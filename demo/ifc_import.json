@@ -1,0 +1,27 @@
+{
+  "ops": [
+    {
+      "op": "io.import_ifc",
+      "args": { "path": "D:/Word/arch0-spike/deliverables/scheme.ifc" }
+    },
+    {
+      "op": "camera.create",
+      "args": { "name": "IfcCam", "translation": [26, -18, 14], "target": [6, 6, 7] }
+    },
+    {
+      "op": "render.high_quality",
+      "args": {
+        "path": "D:/Word/arch0-spike/deliverables/ifc_roundtrip.png",
+        "width": 1600,
+        "height": 900,
+        "spp": 32,
+        "exposure": 5.0,
+        "renderer": "gpu"
+      }
+    },
+    {
+      "op": "io.save_scene",
+      "args": { "path": "D:/Word/arch0-spike/deliverables/ifc_roundtrip_scene.json" }
+    }
+  ]
+}
