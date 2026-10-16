@@ -1,6 +1,8 @@
 # 变更日志
 
-## 0.2.0（内部预览版）— 2026-10-16 · 更名版
+## 0.2.0 — 2026-10-16 · 更名版 · 开源发布
+
+- **开源定证：双许可 MIT OR Apache-2.0**（替换内部预览版占位；Rust 生态惯例）。隐私体检通过：库内零命中、历史收拢为 noreply 单提交（API 上传的 166 笔 QQ 邮箱提交已成无引用悬空对象）。
 
 - **产品更名：Archcore → Archbloom**（无中文名；经六候选占用调查为最优项，详见 README 命名备注）
 - 用户可见面全量更名：productName/identifier/三进制（archbloom-app/run/mcp）/README/文档/Web 查看器标题/MCP 自报家门
