@@ -1,0 +1,149 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "archcore/scene_ir.v0.schema.json",
+  "title": "Archcore Scene IR v0",
+  "description": "agent-first 建筑 3D 场景 IR（单一来源）。units/up_axis 必填（禁隐式默认）。稳定 ID 不复用。",
+  "type": "object",
+  "required": ["schema_version", "units", "up_axis", "name", "objects", "materials", "assets", "meta"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string" },
+    "units": { "enum": ["mm", "cm", "m", "inch", "ft"] },
+    "up_axis": { "enum": ["z_up", "y_up"] },
+    "name": { "type": "string" },
+    "objects": { "type": "array", "items": { "$ref": "#/definitions/object" } },
+    "materials": { "type": "array", "items": { "$ref": "#/definitions/material" } },
+    "assets": { "type": "array", "items": { "$ref": "#/definitions/asset" } },
+    "meta": {
+      "type": "object",
+      "description": "id_seq/mat_seq/asset_seq 单调计数器宿主（审计 #6）",
+      "additionalProperties": { "type": "string" }
+    }
+  },
+  "definitions": {
+    "vec3": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+    "quat": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 },
+    "transform": {
+      "type": "object",
+      "properties": {
+        "translation": { "$ref": "#/definitions/vec3" },
+        "rotation": { "$ref": "#/definitions/quat" },
+        "scale": { "$ref": "#/definitions/vec3" }
+      },
+      "additionalProperties": false
+    },
+    "geometry": {
+      "type": "object",
+      "required": ["positions", "indices"],
+      "properties": {
+        "positions": { "type": "array", "items": { "$ref": "#/definitions/vec3" } },
+        "indices": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+        "normals": { "oneOf": [{ "type": "null" }, { "type": "array", "items": { "$ref": "#/definitions/vec3" } }] },
+        "uv_sets": { "type": "array", "items": { "$ref": "#/definitions/uv_set" } }
+      },
+      "additionalProperties": false
+    },
+    "uv_set": {
+      "type": "object",
+      "required": ["name", "coords"],
+      "properties": {
+        "name": { "type": "string" },
+        "coords": { "type": "array", "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 } }
+      },
+      "additionalProperties": false
+    },
+    "object": {
+      "type": "object",
+      "required": ["id", "name", "kind", "parent", "transform", "visible", "meta"],
+      "properties": {
+        "id": { "type": "string", "description": "稳定 ID（obj-N 单调分配，永不复用）" },
+        "name": { "type": "string" },
+        "kind": { "$ref": "#/definitions/object_kind" },
+        "parent": { "oneOf": [{ "type": "null" }, { "type": "string" }] },
+        "transform": { "$ref": "#/definitions/transform" },
+        "visible": { "type": "boolean" },
+        "meta": { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": false
+    },
+    "object_kind": {
+      "oneOf": [
+        { "$ref": "#/definitions/mesh_kind" },
+        { "$ref": "#/definitions/light_kind" },
+        { "$ref": "#/definitions/camera_kind" },
+        { "type": "object", "required": ["type"], "properties": { "type": { "enum": ["group"] } }, "additionalProperties": false }
+      ]
+    },
+    "mesh_kind": {
+      "type": "object",
+      "required": ["type", "geometry", "material_slots"],
+      "properties": {
+        "type": { "enum": ["mesh"] },
+        "geometry": { "$ref": "#/definitions/geometry" },
+        "material_slots": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "light_kind": {
+      "type": "object",
+      "required": ["type", "light_kind", "color", "intensity"],
+      "properties": {
+        "type": { "enum": ["light"] },
+        "light_kind": { "enum": ["point", "spot", "area", "sun"] },
+        "color": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+        "intensity": { "type": "number" },
+        "size": { "oneOf": [{ "type": "null" }, { "type": "number" }] }
+      },
+      "additionalProperties": true
+    },
+    "camera_kind": {
+      "type": "object",
+      "required": ["type", "lens_mm", "sensor_mm", "clip"],
+      "properties": {
+        "type": { "enum": ["camera"] },
+        "lens_mm": { "type": "number" },
+        "sensor_mm": { "type": "number" },
+        "clip": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 }
+      },
+      "additionalProperties": false
+    },
+    "textures": {
+      "type": "object",
+      "properties": {
+        "base_color": { "oneOf": [{ "type": "null" }, { "type": "string" }] },
+        "normal": { "oneOf": [{ "type": "null" }, { "type": "string" }] },
+        "roughness": { "oneOf": [{ "type": "null" }, { "type": "string" }] },
+        "metallic": { "oneOf": [{ "type": "null" }, { "type": "string" }] },
+        "ao": { "oneOf": [{ "type": "null" }, { "type": "string" }] }
+      },
+      "additionalProperties": false
+    },
+    "material": {
+      "type": "object",
+      "required": ["id", "name", "shading_model", "base_color", "metallic", "roughness", "opacity", "textures"],
+      "properties": {
+        "id": { "type": "string", "description": "mat-N 单调分配" },
+        "name": { "type": "string" },
+        "shading_model": { "enum": ["pbr_metallic_roughness"] },
+        "base_color": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 },
+        "metallic": { "type": "number" },
+        "roughness": { "type": "number" },
+        "opacity": { "type": "number" },
+        "textures": { "$ref": "#/definitions/textures" }
+      },
+      "additionalProperties": false
+    },
+    "asset": {
+      "type": "object",
+      "required": ["id", "uri", "kind"],
+      "properties": {
+        "id": { "type": "string", "description": "asset-N 单调分配" },
+        "uri": { "type": "string" },
+        "kind": { "type": "string" },
+        "license": { "oneOf": [{ "type": "null" }, { "type": "string" }] },
+        "source": { "oneOf": [{ "type": "null" }, { "type": "string" }] }
+      },
+      "additionalProperties": false
+    }
+  }
+}
