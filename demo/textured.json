@@ -1,0 +1,50 @@
+{
+  "ops": [
+    { "op": "material.create", "args": { "name": "MAT_Bricks", "id": "mat-0", "base_color": [0.75, 0.75, 0.75, 1] } },
+    { "op": "material.create", "args": { "name": "MAT_Wood", "id": "mat-1", "base_color": [0.8, 0.8, 0.8, 1] } },
+    {
+      "op": "material.set_texture",
+      "args": {
+        "material": "mat-0",
+        "slot": "base_color",
+        "uri": "D:/Word/arch0-spike/samples/textures/Bricks105_2K-JPG_Color.jpg"
+      }
+    },
+    {
+      "op": "material.set_texture",
+      "args": {
+        "material": "mat-1",
+        "slot": "base_color",
+        "uri": "D:/Word/arch0-spike/samples/textures/Wood096_2K-JPG_Color.jpg"
+      }
+    },
+    {
+      "op": "mesh.create",
+      "args": {
+        "name": "Floor",
+        "positions": [[0, 0, 0], [3, 0, 0], [3, 3, 0], [0, 3, 0]],
+        "indices": [0, 2, 1, 0, 3, 2],
+        "uv": [[0, 0], [3, 0], [3, 3], [0, 3]],
+        "material": "mat-1"
+      }
+    },
+    {
+      "op": "mesh.create",
+      "args": {
+        "name": "Wall",
+        "positions": [[0, 0, 0], [3, 0, 0], [3, 0, 1.8], [0, 0, 1.8]],
+        "indices": [0, 2, 1, 0, 3, 2],
+        "uv": [[0, 0], [3, 0], [3, 1.8], [0, 1.8]],
+        "material": "mat-0"
+      }
+    },
+    {
+      "op": "render.high_quality",
+      "args": { "path": "D:/Word/arch0-spike/hq_textured.png", "width": 800, "height": 600, "spp": 64 }
+    },
+    {
+      "op": "io.save_scene",
+      "args": { "path": "D:/Word/arch0-spike/textured_scene.json" }
+    }
+  ]
+}
