@@ -1,0 +1,74 @@
+{
+  "compose": {
+    "name": "滨水社区中心",
+    "renderer": "gpu",
+    "materials": [
+      { "name": "MAT_Concrete", "id": "mat-0", "base_color": [0.72, 0.72, 0.7, 1] },
+      { "name": "MAT_Wood", "id": "mat-2", "base_color": [0.45, 0.3, 0.18, 1] },
+      { "name": "MAT_Fabric", "id": "mat-3", "base_color": [0.35, 0.42, 0.55, 1] }
+    ],
+    "site": { "size": [40, 30] },
+    "walls": [
+      { "name": "景墙", "position": [12, 24, 0], "size": [16, 0.24, 2.2], "material": "mat-0" },
+      { "name": "隔断", "position": [22, 18, 0], "size": [8, 0.2, 2.8], "material": "mat-0" }
+    ],
+    "buildings": [
+      {
+        "name": "Tower_A",
+        "floors": 5,
+        "floor_height": 3.0,
+        "bays_x": 3,
+        "bay_width": 4.0,
+        "depth": 12.0,
+        "position": [3, 4, 0],
+        "columns": true,
+        "material": "mat-0"
+      },
+      {
+        "name": "Hall_B",
+        "floors": 2,
+        "floor_height": 3.6,
+        "bays_x": 2,
+        "bay_width": 5.0,
+        "depth": 10.0,
+        "position": [22, 12, 0],
+        "columns": true,
+        "material": "mat-0"
+      }
+    ],
+    "openings": [
+      { "wall": "景墙", "kind": "door", "position": [20, 24, 0], "width": 1.8, "height": 2.2 },
+      { "wall": "隔断", "kind": "window", "position": [26, 18, 1.0], "width": 1.6, "height": 1.2 }
+    ],
+    "interiors": [
+      { "preset": "dining", "position": [12, 14, 0], "size": [6, 6], "material": "mat-2" },
+      { "preset": "office", "position": [23, 13, 0], "size": [6, 5], "material": "mat-2" }
+    ],
+    "furniture": [
+      { "kind": "sofa", "name": "休息沙发", "position": [13, 20, 0], "rotate_z": 180, "material": "mat-3" }
+    ],
+    "camera": { "translation": [2, 27, 2.6], "target": [14, 11, 4] },
+    "deliverables": {
+      "perspective": {
+        "path": "D:/Word/arch0-spike/deliverables/compose_view.png",
+        "width": 1600,
+        "height": 900
+      },
+      "panorama": {
+        "path": "D:/Word/arch0-spike/deliverables/compose_panorama.png",
+        "width": 4096,
+        "height": 2048
+      },
+      "walkthrough": {
+        "dir": "D:/Word/arch0-spike/deliverables/compose_walk",
+        "waypoints": [[2, 26, 2.4], [14, 21, 2.6], [26, 14, 2.4], [34, 6, 2.2]],
+        "target": [14, 12, 4],
+        "frames": 24,
+        "width": 960,
+        "height": 540,
+        "fps": 30
+      },
+      "assemble_video": true
+    }
+  }
+}

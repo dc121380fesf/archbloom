@@ -1,0 +1,18 @@
+[package]
+name = "archcore-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "archbloom-mcp"
+path = "src/bin/archcore_mcp.rs"
+
+[dependencies]
+archcore-engine = { path = "../engine" }
+archcore-ops = { path = "../ops" }
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

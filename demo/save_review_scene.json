@@ -1,0 +1,24 @@
+{
+  "ops": [
+    {
+      "op": "mesh.create",
+      "args": {
+        "name": "Floor",
+        "positions": [[0, 0, 0], [2, 0, 0], [2, 2, 0], [0, 2, 0]],
+        "indices": [0, 1, 2, 0, 2, 3]
+      }
+    },
+    {
+      "op": "mesh.create",
+      "args": {
+        "name": "Wall_01",
+        "positions": [[0, 0, 0], [2, 0, 0], [2, 0, 1.2], [0, 0, 1.2]],
+        "indices": [0, 2, 1, 0, 3, 2]
+      }
+    },
+    {
+      "op": "io.save_scene",
+      "args": { "path": "D:/Word/arch0-spike/review_scene.json" }
+    }
+  ]
+}

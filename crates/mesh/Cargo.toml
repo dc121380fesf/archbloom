@@ -1,0 +1,11 @@
+[package]
+name = "archcore-mesh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+manifold-rust = "0.16.0"
+
+[lints]
+workspace = true
