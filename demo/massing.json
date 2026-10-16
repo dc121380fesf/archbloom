@@ -1,0 +1,74 @@
+{
+  "ops": [
+    { "op": "material.create", "args": { "name": "MAT_Concrete", "id": "mat-0", "base_color": [0.72, 0.72, 0.7, 1] } },
+    {
+      "op": "mesh.create",
+      "args": {
+        "name": "Ground",
+        "positions": [[-30, -30, -0.02], [70, -30, -0.02], [70, 50, -0.02], [-30, 50, -0.02]],
+        "indices": [0, 2, 1, 0, 3, 2],
+        "uv": [[0, 0], [25, 0], [25, 20], [0, 20]],
+        "material": "mat-0"
+      }
+    },
+    {
+      "op": "massing.build",
+      "args": {
+        "name": "Tower_A",
+        "floors": 6,
+        "floor_height": 3.0,
+        "bays_x": 3,
+        "bay_width": 4.0,
+        "depth": 12.0,
+        "position": [0, 0, 0],
+        "columns": true,
+        "material": "mat-0"
+      }
+    },
+    {
+      "op": "massing.build",
+      "args": {
+        "name": "Tower_B",
+        "floors": 4,
+        "floor_height": 3.2,
+        "bays_x": 2,
+        "bay_width": 5.0,
+        "depth": 10.0,
+        "position": [20, 2, 0],
+        "columns": true,
+        "material": "mat-0"
+      }
+    },
+    {
+      "op": "camera.create",
+      "args": { "name": "MassingCam", "translation": [34, -26, 18], "target": [12, 6, 8] }
+    },
+    {
+      "op": "render.high_quality",
+      "args": {
+        "path": "D:/Word/arch0-spike/deliverables/massing_schemes.png",
+        "width": 1600,
+        "height": 900,
+        "spp": 48,
+        "renderer": "gpu"
+      }
+    },
+    {
+      "op": "render.walkthrough",
+      "args": {
+        "dir": "D:/Word/arch0-spike/deliverables/massing_walk",
+        "waypoints": [
+          [42, 6, 14], [33, 27, 14], [12, 36, 14], [-9, 27, 14],
+          [-18, 6, 14], [-9, -15, 14], [12, -24, 14], [33, -15, 14], [42, 6, 14]
+        ],
+        "target": [12, 6, 6],
+        "frames": 32,
+        "width": 960,
+        "height": 540,
+        "spp": 16,
+        "fps": 30,
+        "renderer": "gpu"
+      }
+    }
+  ]
+}
