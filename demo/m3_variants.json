@@ -1,0 +1,39 @@
+{
+  "compose": {
+    "template": "community_center",
+    "name": "社区中心比选",
+    "renderer": "gpu",
+    "variants": [
+      {
+        "name": "低层舒展",
+        "buildings": [
+          { "name": "Tower_A", "floors": 3, "floor_height": 3.2, "bays_x": 3, "bay_width": 4.5, "depth": 12.0, "position": [3, 4, 0], "columns": true, "material": "mat-0" },
+          { "name": "Hall_B", "floors": 2, "floor_height": 3.6, "bays_x": 2, "bay_width": 5.0, "depth": 10.0, "position": [22, 12, 0], "columns": true, "material": "mat-0" }
+        ]
+      },
+      {
+        "name": "塔楼主导",
+        "buildings": [
+          { "name": "Tower_A", "floors": 8, "floor_height": 3.0, "bays_x": 3, "bay_width": 4.0, "depth": 12.0, "position": [3, 4, 0], "columns": true, "material": "mat-0" },
+          { "name": "Hall_B", "floors": 1, "floor_height": 4.2, "bays_x": 2, "bay_width": 5.0, "depth": 10.0, "position": [22, 12, 0], "columns": true, "material": "mat-0" }
+        ]
+      },
+      {
+        "name": "均衡",
+        "buildings": [
+          { "name": "Tower_A", "floors": 5, "floor_height": 3.0, "bays_x": 3, "bay_width": 4.0, "depth": 12.0, "position": [3, 4, 0], "columns": true, "material": "mat-0" },
+          { "name": "Hall_B", "floors": 3, "floor_height": 3.6, "bays_x": 2, "bay_width": 5.0, "depth": 10.0, "position": [22, 12, 0], "columns": true, "material": "mat-0" }
+        ]
+      }
+    ],
+    "deliverables": {
+      "perspective": {
+        "path": "D:/Word/arch0-spike/deliverables/m3_compare/view.png",
+        "width": 1200,
+        "height": 675,
+        "spp": 48
+      }
+    },
+    "comparison_path": "D:/Word/arch0-spike/deliverables/m3_compare/comparison.png"
+  }
+}
