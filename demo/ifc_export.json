@@ -1,0 +1,26 @@
+{
+  "ops": [
+    { "op": "material.create", "args": { "name": "MAT_Concrete", "id": "mat-0", "base_color": [0.72, 0.72, 0.7, 1] } },
+    {
+      "op": "massing.build",
+      "args": {
+        "name": "Scheme_A",
+        "floors": 5,
+        "floor_height": 3.0,
+        "bays_x": 3,
+        "bay_width": 4.0,
+        "depth": 12.0,
+        "columns": true,
+        "material": "mat-0"
+      }
+    },
+    {
+      "op": "furniture.create",
+      "args": { "kind": "cabinet", "name": "柜", "position": [1.0, 8.0, 0], "material": "mat-0" }
+    },
+    {
+      "op": "io.export_ifc",
+      "args": { "path": "D:/Word/arch0-spike/deliverables/scheme.ifc" }
+    }
+  ]
+}
