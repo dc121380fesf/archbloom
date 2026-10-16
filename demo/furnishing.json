@@ -1,0 +1,104 @@
+{
+  "ops": [
+    { "op": "material.create", "args": { "name": "MAT_Wall", "id": "mat-0", "base_color": [0.78, 0.76, 0.72, 1] } },
+    { "op": "material.create", "args": { "name": "MAT_Floor", "id": "mat-1", "base_color": [0.62, 0.45, 0.3, 1] } },
+    { "op": "material.create", "args": { "name": "MAT_FurnWood", "id": "mat-2", "base_color": [0.45, 0.3, 0.18, 1] } },
+    { "op": "material.create", "args": { "name": "MAT_Fabric", "id": "mat-3", "base_color": [0.35, 0.42, 0.55, 1] } },
+    {
+      "op": "mesh.create",
+      "args": {
+        "name": "Floor",
+        "positions": [[0, 0, -0.02], [6, 0, -0.02], [6, 5, -0.02], [0, 5, -0.02]],
+        "indices": [0, 2, 1, 0, 3, 2],
+        "uv": [[0, 0], [6, 0], [6, 5], [0, 5]],
+        "material": "mat-1"
+      }
+    },
+    {
+      "op": "mesh.create",
+      "args": {
+        "name": "WallFront",
+        "positions": [[0,0,0],[6,0,0],[6,0.2,0],[0,0.2,0],[0,0,2.8],[6,0,2.8],[6,0.2,2.8],[0,0.2,2.8]],
+        "indices": [0,2,1,0,3,2,4,5,6,4,6,7,0,1,5,0,5,4,2,3,7,2,7,6,1,2,6,1,6,5,0,4,7,0,7,3],
+        "material": "mat-0"
+      }
+    },
+    {
+      "op": "mesh.create",
+      "args": {
+        "name": "WallSide",
+        "positions": [[5.8,0,0],[6,0,0],[6,5,0],[5.8,5,0],[5.8,0,2.8],[6,0,2.8],[6,5,2.8],[5.8,5,2.8]],
+        "indices": [0,2,1,0,3,2,4,5,6,4,6,7,0,1,5,0,5,4,2,3,7,2,7,6,1,2,6,1,6,5,0,4,7,0,7,3],
+        "material": "mat-0"
+      }
+    },
+    {
+      "op": "opening.cut",
+      "args": { "wall": "obj-2", "kind": "door", "position": [1.2, 0, 0], "width": 0.95, "height": 2.1 }
+    },
+    {
+      "op": "opening.cut",
+      "args": { "wall": "obj-2", "kind": "window", "position": [4.3, 0, 0.95], "width": 1.3, "height": 1.4 }
+    },
+    {
+      "op": "furniture.create",
+      "args": { "kind": "door", "name": "DoorFrame", "position": [0.725, -0.08, 0], "size": [0.95, 0.36, 2.1], "material": "mat-2" }
+    },
+    {
+      "op": "furniture.create",
+      "args": { "kind": "window", "name": "WindowFrame", "position": [3.65, -0.08, 0.95], "size": [1.3, 0.36, 1.4], "material": "mat-2" }
+    },
+    {
+      "op": "furniture.create",
+      "args": { "kind": "table", "name": "DiningTable", "position": [2.3, 2.1, 0], "size": [1.6, 0.9, 0.75], "material": "mat-2" }
+    },
+    {
+      "op": "furniture.create",
+      "args": { "kind": "chair", "name": "Chair_A", "position": [2.5, 1.3, 0], "rotate_z": 180, "material": "mat-2" }
+    },
+    {
+      "op": "furniture.create",
+      "args": { "kind": "chair", "name": "Chair_B", "position": [2.5, 3.15, 0], "material": "mat-2" }
+    },
+    {
+      "op": "furniture.create",
+      "args": { "kind": "sofa", "name": "Sofa", "position": [0.3, 3.6, 0], "rotate_z": 90, "size": [2.0, 0.9, 0.85], "material": "mat-3" }
+    },
+    {
+      "op": "furniture.create",
+      "args": { "kind": "cabinet", "name": "Cabinet", "position": [4.9, 4.3, 0], "rotate_z": 180, "material": "mat-2" }
+    },
+    {
+      "op": "furniture.create",
+      "args": { "kind": "bookshelf", "name": "Bookshelf", "position": [5.45, 1.2, 0], "rotate_z": 90, "size": [1.2, 0.32, 1.9], "material": "mat-2" }
+    },
+    {
+      "op": "camera.create",
+      "args": { "name": "RoomCam", "translation": [3.2, 4.2, 1.7], "target": [1.6, 0, 1.1] }
+    },
+    {
+      "op": "render.high_quality",
+      "args": {
+        "path": "D:/Word/arch0-spike/deliverables/furnished_room.png",
+        "width": 1600,
+        "height": 900,
+        "spp": 48,
+        "renderer": "gpu"
+      }
+    },
+    {
+      "op": "render.walkthrough",
+      "args": {
+        "dir": "D:/Word/arch0-spike/deliverables/furnish_walk",
+        "waypoints": [[1.0, 4.3, 1.6], [2.6, 2.8, 1.6], [4.2, 1.6, 1.55]],
+        "target": [1.5, 0.2, 1.1],
+        "frames": 24,
+        "width": 960,
+        "height": 540,
+        "spp": 16,
+        "fps": 30,
+        "renderer": "gpu"
+      }
+    }
+  ]
+}

@@ -1,0 +1,82 @@
+BlenderMCP addon registered
+BlenderMCP addon unregistered
+09:40:08 | INFO: Data are loaded, start creating Blender stuff
+09:40:08 | INFO: Blender create Mesh node BoxA
+09:40:08 | INFO: Blender create Mesh node BoxB
+09:40:08 | INFO: glTF import finished in 0.00s
+
+FBX export starting... 'D:/Word/arch0-spike/fbx-roundtrip/product_rt.fbx'
+export finished in 0.0065 sec.
+FBX_BRIDGE_OK
+Blender 4.5.3 LTS (hash 67807e1800cc built 2025-09-09 01:33:33)
+
+Blender quit
+{
+  "ok": true,
+  "reports": [
+    {
+      "changed": [
+        "obj-1"
+      ],
+      "facts_after": {
+        "geometry_hash": 14017644273594652143,
+        "hierarchy_hash": 3201686018947044559,
+        "mesh_count": 1,
+        "object_count": 1,
+        "triangle_count": 12
+      },
+      "facts_before": {
+        "geometry_hash": 15130871412783076140,
+        "hierarchy_hash": 13646096770106105413,
+        "mesh_count": 0,
+        "object_count": 0,
+        "triangle_count": 0
+      },
+      "idempotent": false,
+      "op_id": "mesh.create",
+      "read_only": false
+    },
+    {
+      "changed": [
+        "obj-2"
+      ],
+      "facts_after": {
+        "geometry_hash": 3477703445790780146,
+        "hierarchy_hash": 5847509342216522928,
+        "mesh_count": 2,
+        "object_count": 2,
+        "triangle_count": 24
+      },
+      "facts_before": {
+        "geometry_hash": 14017644273594652143,
+        "hierarchy_hash": 3201686018947044559,
+        "mesh_count": 1,
+        "object_count": 1,
+        "triangle_count": 12
+      },
+      "idempotent": false,
+      "op_id": "mesh.create",
+      "read_only": false
+    },
+    {
+      "changed": [],
+      "facts_after": {
+        "geometry_hash": 3477703445790780146,
+        "hierarchy_hash": 5847509342216522928,
+        "mesh_count": 2,
+        "object_count": 2,
+        "triangle_count": 24
+      },
+      "facts_before": {
+        "geometry_hash": 3477703445790780146,
+        "hierarchy_hash": 5847509342216522928,
+        "mesh_count": 2,
+        "object_count": 2,
+        "triangle_count": 24
+      },
+      "idempotent": true,
+      "op_id": "io.export_fbx",
+      "read_only": true
+    }
+  ]
+}

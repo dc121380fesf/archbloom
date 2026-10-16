@@ -1,0 +1,16 @@
+{
+  "ops": [
+    {
+      "op": "mesh.create",
+      "args": {
+        "name": "Wall_01",
+        "positions": [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]],
+        "indices": [0, 1, 2, 0, 2, 3]
+      }
+    },
+    {
+      "op": "io.export_fbx",
+      "args": { "path": "D:/Word/arch0-spike/fbx-roundtrip/from_engine.fbx" }
+    }
+  ]
+}

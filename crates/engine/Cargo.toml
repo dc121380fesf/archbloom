@@ -1,0 +1,23 @@
+[package]
+name = "archcore-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "archbloom-run"
+path = "src/bin/run_script.rs"
+
+[dependencies]
+archcore-ir = { path = "../ir" }
+archcore-ops = { path = "../ops" }
+archcore-txn = { path = "../txn" }
+archcore-verify = { path = "../verify" }
+archcore-mesh = { path = "../mesh" }
+archcore-io = { path = "../io" }
+archcore-render = { path = "../render", features = ["gpu"] }
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

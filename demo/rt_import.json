@@ -1,0 +1,12 @@
+{
+  "ops": [
+    {
+      "op": "io.import_fbx",
+      "args": { "path": "D:/Word/arch0-spike/fbx-roundtrip/product_rt.fbx" }
+    },
+    {
+      "op": "render.preview",
+      "args": { "path": "D:/Word/arch0-spike/review_import.png", "width": 640, "height": 480 }
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+/target/
+/dist/
+_build/
+*.pdb
+node_modules/

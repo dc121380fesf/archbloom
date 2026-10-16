@@ -1,0 +1,14 @@
+Blender 4.5.3 LTS (hash 67807e1800cc built 2025-09-09 01:33:33)
+BlenderMCP addon registered
+BlenderMCP addon unregistered
+FBX version: 7400
+
+Blender quit
+{
+  "error": {
+    "code": "internal",
+    "reason": "Bridge(\"glTF 中间件未产出\")"
+  },
+  "failed_step": 0,
+  "ok": false
+}
