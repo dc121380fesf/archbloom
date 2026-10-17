@@ -320,7 +320,7 @@ fn do_render(
 
     // PNG 编码（RGB8，与 CPU 轨同格式）交给调用方（全景需拼接后再编码）
     let mut img = image::RgbImage::new(width, height);
-    for (i, px) in data.chunks_exact(4).enumerate() {
+    for (i, px) in data.as_chunks::<4>().0.iter().enumerate() {
         let (x, y) = ((i as u32) % width, (i as u32) / width);
         img.put_pixel(x, y, image::Rgb([px[0], px[1], px[2]]));
     }

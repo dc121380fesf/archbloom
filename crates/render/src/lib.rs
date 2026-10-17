@@ -164,7 +164,7 @@ fn collect_tris(scene: &Scene) -> (Vec<Tri>, Vec<String>) {
                 })
                 .unwrap_or(([0.72, 0.72, 0.75], false, None));
             let uvs = geometry.uv_sets.first().map(|u| &u.coords);
-            for tri in geometry.indices.chunks_exact(3) {
+            for tri in geometry.indices.as_chunks::<3>().0 {
                 let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
                 if a < geometry.positions.len() && b < geometry.positions.len() && c < geometry.positions.len() {
                     let uv = uvs.and_then(|coords| {
