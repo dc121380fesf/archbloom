@@ -90,14 +90,6 @@ reports it explicitly rather than failing silently.
 - Two rendering tracks: a deterministic CPU track and a fast GPU track. Stable IDs are never reused; dual-hash fact surfaces; explicit transaction boundaries
 - Built from scratch: the IR scene format, half-edge topology, the path tracer, the WebGL2 viewer, a STEP Part 21 parser
 
-## A note on the name
-
-The internal codename was Archcore; the product is now **Archbloom**. The name was settled after
-checking six candidates for collisions (no same-category software product, no active package, no
-known prior mark; npm / crates.io / PyPI all clear). Internal crate names and the IR schema keep the
-`archcore-*` prefix for compatibility. Known namesakes: Archbloom Mimarlık (landscape architecture,
-Turkey) and others — registering your own trademark before going international is advisable.
-
 ## License
 
 Dual-licensed under **MIT OR Apache-2.0** (see `LICENSE-MIT` and `LICENSE-APACHE`, pick either) —

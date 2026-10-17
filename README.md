@@ -84,13 +84,6 @@ archbloom-run my_scene.json
 - 确定性渲染轨（CPU）+ 速度轨（GPU）双轨制；稳定 ID 不复用、双哈希事实面、事务进出
 - 自研核心：IR 场景格式、半边拓扑、路径追踪器、WebGL2 查看器、STEP P21 解析器
 
-## 命名备注
-
-原工程代号 Archcore，产品正名 **Archbloom**。经六候选占用调查定案（无同赛道软件产品 /
-活跃包 / 已知在先商标；npm / crates.io / PyPI 全空）。内核 crate 与 IR schema 保持
-archcore-* 命名以保兼容。已知同名共存：土耳其 Archbloom Mimarlık（建筑景观）等——
-出海前建议注册自有商标。
-
 ## 许可证
 
 双许可 **MIT OR Apache-2.0**（见 LICENSE-MIT 与 LICENSE-APACHE，任选其一）—— Rust 生态惯例。第三方组件见 THIRD_PARTY.md。
