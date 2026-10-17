@@ -1,6 +1,8 @@
 //! IFC（ISO 16739 / STEP Part 21）子集适配器。
+//!
 //! 导入：空间层级（IfcProject/Site/Building/Storey）+ 拉伸体（IfcExtrudedAreaSolid）
-//! + 三角面集（IfcTriangulatedFaceSet）；导出：IfcTriangulatedFaceSet 镶嵌表示（网格内核的诚实映射）。
+//! 与三角面集（IfcTriangulatedFaceSet）；导出：IfcTriangulatedFaceSet 镶嵌表示（网格内核的诚实映射）。
+//!
 //! 敌对输入口径：解析失败一律 IoError::Format 带位置，绝不 panic（io 审计教训内化）。
 
 use crate::IoError;
@@ -520,7 +522,7 @@ fn extruded_solid(
         norm(parse_vec3(&d.attrs[0])?)
     };
     let depth = as_num(&e.attrs[3]).ok_or_else(|| IoError::Format("Depth 缺失".into()))?;
-    if !(depth > 0.0) {
+    if !depth.is_finite() || depth <= 0.0 {
         return Err(IoError::Format("Depth 须为正".into()));
     }
     let base = out.len() as u32;
@@ -622,7 +624,7 @@ pub fn import_ifc(text: &str) -> Result<Scene, IoError> {
         if e.kind == "IFCBUILDINGSTOREY" {
             let id = format!("obj-{}", scene.objects.len() + 1);
             let name = as_str(&e.attrs[2]).unwrap_or("Storey").to_string();
-            let z = as_num(&e.attrs.get(9).unwrap_or(&Attr::Null)).unwrap_or(0.0);
+            let z = as_num(e.attrs.get(9).unwrap_or(&Attr::Null)).unwrap_or(0.0);
             scene.objects.push(Object {
                 id: id.clone(),
                 name: name.clone(),

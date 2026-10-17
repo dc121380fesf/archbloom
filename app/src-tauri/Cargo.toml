@@ -1,7 +1,8 @@
 [package]
 name = "archcore-app"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -11,7 +12,8 @@ tauri = { version = "2", features = [] }
 serde.workspace = true
 serde_json.workspace = true
 archcore-ir = { path = "../../crates/ir" }
-archcore-render = { path = "../../crates/render" }
+archcore-render = { path = "../../crates/render", features = ["gpu"] }
+base64 = "0.22"
 
 [lints]
 workspace = true

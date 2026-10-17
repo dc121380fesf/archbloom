@@ -2,12 +2,12 @@
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<title>Archcore 评审视口</title>
+<title>Archbloom 评审视口</title>
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #171a20; color: #dfe3ea;
     font: 13px/1.5 system-ui, "Segoe UI", sans-serif; }
   canvas { display: block; width: 100vw; height: 100vh; }
-  #hud { position: fixed; top: 12px; left: 14px; right: 14px; display: flex; gap: 10px;
+  #hud { position: fixed; top: 12px; left: 14px; right: 278px; display: flex; gap: 10px;
     align-items: center; background: rgba(20,24,32,.82); padding: 9px 12px;
     border-radius: 10px; backdrop-filter: blur(6px); }
   #path { flex: 1; background: #0e1117; color: #dfe3ea; border: 1px solid #2c3442;
@@ -15,35 +15,88 @@
   button { background: #3b82f6; color: #fff; border: 0; border-radius: 6px;
     padding: 7px 14px; cursor: pointer; font-weight: 600; }
   button:hover { background: #2f6fe0; }
-  #status { opacity: .85; min-width: 170px; }
+  button:disabled { background: #2c3442; cursor: wait; }
+  #status { opacity: .85; min-width: 150px; }
   #hint { position: fixed; bottom: 12px; left: 14px; opacity: .6; }
+  #panel { position: fixed; top: 12px; right: 12px; width: 250px;
+    background: rgba(20,24,32,.88); border-radius: 10px; padding: 12px 14px;
+    backdrop-filter: blur(6px); display: grid; gap: 9px; }
+  #panel h3 { margin: 0; font-size: 13px; }
+  #panel label { display: grid; gap: 3px; font-size: 11px; opacity: .8; }
+  #panel select { background: #0e1117; color: #dfe3ea; border: 1px solid #2c3442;
+    border-radius: 6px; padding: 5px 7px; font: 12px system-ui; }
+  #presult { font: 11px ui-monospace, monospace; opacity: .85; word-break: break-all; min-height: 30px; }
 </style>
 </head>
 <body>
 <div id="hud">
-  <strong>Archcore 评审视口</strong>
+  <strong>Archbloom 评审视口</strong>
   <input id="path" value="D:/Word/arch0-spike/review_scene.json" spellcheck="false">
   <button id="load">重新载入场景</button>
   <span id="status">未载入</span>
+</div>
+<div id="panel">
+  <h3>出图面板</h3>
+  <label>预设
+    <select id="preset">
+      <option value="view">透视渲染（路径追踪）</option>
+      <option value="pano">全景（等距柱状 2:1）</option>
+    </select>
+  </label>
+  <label>分辨率
+    <select id="res">
+      <option value="1280x720">1280 × 720</option>
+      <option value="1920x1080" selected>1920 × 1080</option>
+      <option value="2560x1440">2560 × 1440</option>
+      <option value="3840x2160">3840 × 2160</option>
+    </select>
+  </label>
+  <label>采样（spp）
+    <select id="spp">
+      <option value="16">16（快）</option>
+      <option value="64" selected>64（标准）</option>
+      <option value="128">128（细）</option>
+    </select>
+  </label>
+  <label>渲染轨
+    <select id="track">
+      <option value="auto" selected>auto（GPU 优先）</option>
+      <option value="gpu">gpu</option>
+      <option value="cpu">cpu（确定性）</option>
+    </select>
+  </label>
+  <button id="shot">出图</button>
+  <div id="presult">就绪。产物落在场景文件旁。</div>
 </div>
 <div id="hint">拖动旋转 · 滚轮缩放 · 右键平移</div>
 <canvas id="c"></canvas>
 <script>
 const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
 const canvas = document.getElementById('c');
-const gl = canvas.getContext('webgl', { antialias: true });
+const gl = canvas.getContext('webgl2', { antialias: true });
 const statusEl = document.getElementById('status');
+const resultEl = document.getElementById('presult');
 window.onerror = (msg) => { statusEl.textContent = `JS 异常: ${msg}`; return true; };
+if (!gl) statusEl.textContent = '需要 WebGL2（显卡驱动过旧？）';
 
-// ---------- 着色器（平涂 + 法线明暗） ----------
-const vs = `attribute vec3 aPos; attribute vec3 aNormal; attribute vec3 aColor;
-uniform mat4 uMVP; varying vec3 vColor; varying vec3 vNormal;
-void main(){ vColor = aColor; vNormal = aNormal;
+// ---------- 着色器：纹理 × 材质底色 × 日光/天空环境（与渲染口径近似） ----------
+const vs = `#version 300 es
+in vec3 aPos; in vec3 aNormal; in vec3 aColor; in vec2 aUV;
+uniform mat4 uMVP; out vec3 vColor; out vec3 vNormal; out vec2 vUV;
+void main(){ vColor = aColor; vNormal = aNormal; vUV = aUV;
   gl_Position = uMVP * vec4(aPos, 1.0); }`;
-const fs = `precision mediump float; varying vec3 vColor; varying vec3 vNormal;
-void main(){ vec3 l = normalize(vec3(0.4, 0.35, 0.85));
-  float d = 0.32 + 0.68 * abs(dot(normalize(vNormal), l));
-  gl_FragColor = vec4(vColor * d, 1.0); }`;
+const fs = `#version 300 es
+precision highp float;
+in vec3 vColor; in vec3 vNormal; in vec2 vUV;
+uniform sampler2D uTex; uniform float uTexOn;
+out vec4 fragColor;
+void main(){
+  vec3 l = normalize(vec3(0.45, 0.32, 0.83));
+  float d = 0.30 + 0.70 * abs(dot(normalize(vNormal), l));
+  vec3 base = vColor * mix(vec3(1.0), texture(uTex, vUV).rgb, uTexOn);
+  vec3 c = pow(base * d, vec3(1.0 / 2.2));
+  fragColor = vec4(c, 1.0);
+}`;
 function shader(type, src){ const s = gl.createShader(type);
   gl.shaderSource(s, src); gl.compileShader(s);
   if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
@@ -56,7 +109,9 @@ const loc = {
   pos: gl.getAttribLocation(prog, 'aPos'),
   normal: gl.getAttribLocation(prog, 'aNormal'),
   color: gl.getAttribLocation(prog, 'aColor'),
+  uv: gl.getAttribLocation(prog, 'aUV'),
   mvp: gl.getUniformLocation(prog, 'uMVP'),
+  texOn: gl.getUniformLocation(prog, 'uTexOn'),
 };
 
 // ---------- 矩阵 ----------
@@ -104,22 +159,62 @@ function eyePos(){
           target[2] + dist * Math.sin(pitch)];
 }
 
-// ---------- 几何缓冲 ----------
-let vertexCount = 0;
-const buf = gl.createBuffer();
-function loadTriangles(tris){
-  const data = [];
+// ---------- 几何：按贴图分批（UV/贴图索引与路径追踪同源） ----------
+const batches = [];  // { tex: number|-1, vao, buf, count }
+const texCache = new Map();   // 索引 → WebGLTexture | 'loading' | 'none'
+function loadTriangles(tris, texPaths){
+  const groups = new Map();
   for (const t of tris) {
-    const n = norm(cross(sub(t.p[1], t.p[0]), sub(t.p[2], t.p[0])));
-    for (const p of t.p) data.push(p[0], p[1], p[2], n[0], n[1], n[2], t.color[0], t.color[1], t.color[2]);
+    const key = (t.tex === null || t.tex === undefined) ? -1 : t.tex;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(t);
   }
-  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
-  const stride = 9 * 4;
-  gl.enableVertexAttribArray(loc.pos); gl.vertexAttribPointer(loc.pos, 3, gl.FLOAT, false, stride, 0);
-  gl.enableVertexAttribArray(loc.normal); gl.vertexAttribPointer(loc.normal, 3, gl.FLOAT, false, stride, 12);
-  gl.enableVertexAttribArray(loc.color); gl.vertexAttribPointer(loc.color, 3, gl.FLOAT, false, stride, 24);
-  vertexCount = tris.length * 3;
+  for (const b of batches) { gl.deleteBuffer(b.buf); gl.deleteVertexArray(b.vao); }
+  batches.length = 0;
+  for (const [key, list] of groups) {
+    const data = [];
+    for (const t of list) {
+      const n = norm(cross(sub(t.p[1], t.p[0]), sub(t.p[2], t.p[0])));
+      const uvs = t.uv || [[0,0],[0,0],[0,0]];
+      for (let i = 0; i < 3; i++) {
+        const p = t.p[i];
+        data.push(p[0], p[1], p[2], n[0], n[1], n[2],
+                  t.color[0], t.color[1], t.color[2], uvs[i][0], uvs[i][1]);
+      }
+    }
+    const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
+    const stride = 11 * 4;
+    gl.enableVertexAttribArray(loc.pos); gl.vertexAttribPointer(loc.pos, 3, gl.FLOAT, false, stride, 0);
+    gl.enableVertexAttribArray(loc.normal); gl.vertexAttribPointer(loc.normal, 3, gl.FLOAT, false, stride, 12);
+    gl.enableVertexAttribArray(loc.color); gl.vertexAttribPointer(loc.color, 3, gl.FLOAT, false, stride, 24);
+    gl.enableVertexAttribArray(loc.uv); gl.vertexAttribPointer(loc.uv, 2, gl.FLOAT, false, stride, 36);
+    batches.push({ tex: key, vao, buf, count: list.length * 3 });
+    if (key >= 0 && !texCache.has(key)) texCache.set(key, 'loading');
+  }
+  // 异步补贴图（失败不炸视口：退回底色）
+  for (const [key, state] of texCache) {
+    if (state !== 'loading') continue;
+    const p = texPaths[key];
+    if (!p) { texCache.set(key, 'none'); continue; }
+    invoke('read_texture', { path: p }).then(url => {
+      const img = new Image();
+      img.onload = () => {
+        const tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+        gl.generateMipmap(gl.TEXTURE_2D);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+        texCache.set(key, tex); render();
+      };
+      img.onerror = () => { texCache.set(key, 'none'); };
+      img.src = url;
+    }).catch(() => texCache.set(key, 'none'));
+  }
 }
 function resize(){
   canvas.width = canvas.clientWidth * devicePixelRatio;
@@ -127,32 +222,66 @@ function resize(){
   gl.viewport(0, 0, canvas.width, canvas.height);
 }
 function render(){
+  if (!gl) return;
   resize();
   gl.enable(gl.DEPTH_TEST);
   gl.clearColor(0.09, 0.10, 0.13, 1);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-  if (!vertexCount) return;
+  if (!batches.length) return;
   const proj = perspective(0.9, canvas.width / canvas.height, 0.05, 500);
   const view = lookAt(eyePos(), target, [0, 0, 1]);
   gl.uniformMatrix4fv(loc.mvp, false, mul(proj, view));
-  gl.drawArrays(gl.TRIANGLES, 0, vertexCount);
+  for (const b of batches) {
+    const tex = texCache.get(b.tex);
+    const on = (typeof tex === 'object' && tex) ? 1 : 0;
+    gl.uniform1f(loc.texOn, on);
+    if (on) { gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex); }
+    gl.bindVertexArray(b.vao);
+    gl.drawArrays(gl.TRIANGLES, 0, b.count);
+  }
 }
 window.addEventListener('resize', render);
 
+// ---------- 场景载入 ----------
 async function loadScene(){
   const path = document.getElementById('path').value;
   if (!invoke) { statusEl.textContent = 'Tauri 全局未注入（在浏览器里打开会这样；桌面窗内不应出现）'; return; }
   statusEl.textContent = '载入中…';
   try {
     const res = await invoke('read_scene', { path });
-    loadTriangles(res.triangles);
+    loadTriangles(res.triangles, res.textures || []);
     render();
-    statusEl.textContent = `${res.name || '场景'} · ${res.triangles.length} 三角形`;
+    statusEl.textContent = `${res.name || '场景'} · ${res.triangles.length} 三角形 · ${(res.textures || []).length} 贴图`;
   } catch (e) {
     statusEl.textContent = `失败: ${e}`;
   }
 }
 document.getElementById('load').onclick = loadScene;
+
+// ---------- 出图面板 ----------
+document.getElementById('shot').onclick = async () => {
+  if (!invoke) { resultEl.textContent = 'Tauri 全局未注入'; return; }
+  const btn = document.getElementById('shot');
+  const [w, h] = document.getElementById('res').value.split('x').map(Number);
+  const args = {
+    path: document.getElementById('path').value,
+    preset: document.getElementById('preset').value,
+    width: w, height: h,
+    spp: Number(document.getElementById('spp').value),
+    renderer: document.getElementById('track').value,
+  };
+  btn.disabled = true;
+  resultEl.textContent = `渲染中…（${args.preset} ${w}×${h} ${args.spp}spp）`;
+  try {
+    const r = await invoke('render_scene', args);
+    resultEl.textContent = `完成 ${(r.elapsed_ms / 1000).toFixed(1)}s · ${r.track}\n${r.path}`;
+  } catch (e) {
+    resultEl.textContent = `失败: ${e}`;
+  } finally {
+    btn.disabled = false;
+  }
+};
+
 loadScene();
 render();
 </script>

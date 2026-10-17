@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/ir", "crates/ops", "crates/txn", "crates/verify", "crates/mesh", "crates/engine", "crates/mcp", "crates/io", "crates/render", "app/src-tauri"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 

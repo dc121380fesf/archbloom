@@ -10,8 +10,11 @@
   <img alt="Rust" src="https://img.shields.io/badge/Rust-core-orange">
   <img alt="tests" src="https://img.shields.io/badge/tests-127%20green">
   <img alt="clippy" src="https://img.shields.io/badge/clippy-0%20warnings-blue">
-  <img alt="license" src="https://img.shields.io/badge/license-internal%20preview-lightgrey">
+  <img alt="license" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue">
 </p>
+
+> **写在前面**：AI 接入 3D 的个人尝试，期望可以用于真实的 3D 工作场景，目前可初步应用，
+> 也可以用于大模型的 3D 建模与空间能力测评，个人低质作品，希望各位大佬提出意见。
 
 agent 造方案、人来拍板：参数化体块与软装一键成场景，效果图 / 8K 全景 / VR 立体 / 漫游视频一次全出，
 FBX / IFC / glTF 双向互转，30+ 建模渲染工具经 MCP 直接给 agent 用。
@@ -87,4 +90,4 @@ archcore-* 命名以保兼容。已知同名共存：土耳其 Archbloom Mimarl�
 
 ## 许可证
 
-内部预览版，保留所有权利（见 LICENSE）。第三方组件见 THIRD_PARTY.md。
+双许可 **MIT OR Apache-2.0**（见 LICENSE-MIT 与 LICENSE-APACHE，任选其一）—— Rust 生态惯例。第三方组件见 THIRD_PARTY.md。
