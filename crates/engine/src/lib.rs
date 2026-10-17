@@ -544,6 +544,34 @@ fn register_io_ops(reg: &mut OpRegistry) -> Result<(), OpError> {
     })?;
     reg.register(OpSpec {
         def: OpDef {
+            id: "io.save_archive".into(),
+            label: "保存存档".into(),
+            description: "打包为 .al 自包含存档（场景 + 贴图字节，容器内相对路径）；换机器可直接打开".into(),
+            category: OpCategory::Io,
+            annotations: OpAnnotations {
+                destructive: false,
+                idempotent: true,
+                read_only: true,
+            },
+            params: vec![param("path", "string", true, ".al 输出路径")],
+        },
+        handler: Box::new(|scene, args| {
+            let path = args["path"].as_str().unwrap();
+            ensure_parent(path)?;
+            let report = archcore_io::archive::pack(scene, std::path::Path::new(path))
+                .map_err(|e| OpError::Internal { reason: format!("{e}") })?;
+            Ok((
+                vec![],
+                serde_json::json!({
+                    "path": path,
+                    "assets_packed": report.assets_packed,
+                    "warnings": report.warnings,
+                }),
+            ))
+        }),
+    })?;
+    reg.register(OpSpec {
+        def: OpDef {
             id: "io.import_fbx".into(),
             label: "导入 FBX".into(),
             description: "经 Blender 桥导入 FBX 并入场景（id 重排、父子/材质重映射；灯光为已知损耗项）".into(),
@@ -648,7 +676,7 @@ fn register_io_ops(reg: &mut OpRegistry) -> Result<(), OpError> {
         def: OpDef {
             id: "io.load_scene".into(),
             label: "载入场景".into(),
-            description: "从 JSON 载入 IR 场景（整体替换当前文档）".into(),
+            description: "从场景文件载入 IR（整体替换当前文档）；`.al` 自包含存档自动解包并落地贴图".into(),
             category: OpCategory::Io,
             annotations: OpAnnotations {
                 destructive: true,
@@ -661,8 +689,15 @@ fn register_io_ops(reg: &mut OpRegistry) -> Result<(), OpError> {
             let path = args["path"].as_str().unwrap();
             let data =
                 std::fs::read(path).map_err(|e| OpError::Internal { reason: e.to_string() })?;
-            let loaded: Scene = serde_json::from_slice(&data)
-                .map_err(|e| OpError::Internal { reason: e.to_string() })?;
+            let loaded: Scene = if path.to_ascii_lowercase().ends_with(".al") {
+                // .al：解包到内容指纹目录，贴图 uri 指回落盘位置
+                let dir = archcore_io::archive::default_extract_dir(&data);
+                archcore_io::archive::open(&data, &dir)
+                    .map_err(|e| OpError::Internal { reason: format!("{e}") })?
+            } else {
+                serde_json::from_slice(&data)
+                    .map_err(|e| OpError::Internal { reason: e.to_string() })?
+            };
             let changed: Vec<String> = loaded.objects.iter().map(|o| o.id.clone()).collect();
             *scene = loaded;
             // 载入外部场景后同步 id 计数器（审计 #6：否则删除最高 id 后新建即复用）

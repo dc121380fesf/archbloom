@@ -2,41 +2,103 @@
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<title>Archbloom 评审视口</title>
+<title>Archbloom</title>
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #171a20; color: #dfe3ea;
     font: 13px/1.5 system-ui, "Segoe UI", sans-serif; }
   canvas { display: block; width: 100vw; height: 100vh; }
-  #hud { position: fixed; top: 12px; left: 14px; right: 278px; display: flex; gap: 10px;
-    align-items: center; background: rgba(20,24,32,.82); padding: 9px 12px;
-    border-radius: 10px; backdrop-filter: blur(6px); }
-  #path { flex: 1; background: #0e1117; color: #dfe3ea; border: 1px solid #2c3442;
-    border-radius: 6px; padding: 6px 9px; font: 12px ui-monospace, monospace; }
-  button { background: #3b82f6; color: #fff; border: 0; border-radius: 6px;
-    padding: 7px 14px; cursor: pointer; font-weight: 600; }
-  button:hover { background: #2f6fe0; }
-  button:disabled { background: #2c3442; cursor: wait; }
-  #status { opacity: .85; min-width: 150px; }
-  #hint { position: fixed; bottom: 12px; left: 14px; opacity: .6; }
-  #panel { position: fixed; top: 12px; right: 12px; width: 250px;
-    background: rgba(20,24,32,.88); border-radius: 10px; padding: 12px 14px;
-    backdrop-filter: blur(6px); display: grid; gap: 9px; }
+
+  /* ---------- 菜单栏 ---------- */
+  #menubar { position: fixed; top: 0; left: 0; right: 0; height: 34px; z-index: 40;
+    display: flex; align-items: center; gap: 2px; padding: 0 10px;
+    background: #1b1f27; border-bottom: 1px solid #2a3140; user-select: none; }
+  #brand { font-weight: 700; letter-spacing: .3px; margin-right: 10px; color: #8ab4f8; }
+  .menu { position: relative; }
+  .menu > button { background: transparent; color: #dfe3ea; border: 0; padding: 6px 11px;
+    border-radius: 6px; cursor: pointer; font: inherit; }
+  .menu > button:hover, .menu.open > button { background: #2a3140; }
+  .dropdown { display: none; position: absolute; top: 100%; left: 0; min-width: 218px;
+    background: #232a36; border: 1px solid #37405275; border-radius: 8px; padding: 5px;
+    box-shadow: 0 12px 28px #0009; margin-top: 3px; }
+  .menu.open .dropdown { display: block; }
+  .item { display: flex; align-items: center; justify-content: space-between; gap: 18px;
+    padding: 7px 10px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+  .item:hover { background: #33405a; }
+  .item kbd { font: 11px ui-monospace, monospace; opacity: .55; }
+  .sep { height: 1px; background: #374052; margin: 5px 6px; }
+  .subparent { position: relative; }
+  .subparent > .item::after { content: "▸"; opacity: .6; }
+  .submenu { display: none; position: absolute; left: 100%; top: -6px; min-width: 230px;
+    background: #232a36; border: 1px solid #37405275; border-radius: 8px; padding: 5px;
+    box-shadow: 0 12px 28px #0009; }
+  .subparent:hover > .submenu { display: block; }
+  .group { padding: 6px 10px 3px; font-size: 11px; letter-spacing: .5px;
+    color: #8ab4f8; opacity: .85; }
+
+  /* ---------- 状态栏 ---------- */
+  #status { position: fixed; top: 34px; left: 0; right: 0; height: 26px; z-index: 30;
+    display: flex; align-items: center; gap: 12px; padding: 0 12px; font-size: 12px;
+    background: #141820e6; border-bottom: 1px solid #2a3140; backdrop-filter: blur(6px); }
+  #docname { font-weight: 600; }
+  #docpath { opacity: .55; font: 11px ui-monospace, monospace; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  #scenestat { opacity: .75; }
+
+  /* ---------- 出图面板 ---------- */
+  #panel { position: fixed; top: 72px; right: 12px; width: 250px; z-index: 20;
+    background: rgba(20,24,32,.9); border: 1px solid #2a3140; border-radius: 10px;
+    padding: 12px 14px; backdrop-filter: blur(6px); display: grid; gap: 9px; }
   #panel h3 { margin: 0; font-size: 13px; }
   #panel label { display: grid; gap: 3px; font-size: 11px; opacity: .8; }
   #panel select { background: #0e1117; color: #dfe3ea; border: 1px solid #2c3442;
     border-radius: 6px; padding: 5px 7px; font: 12px system-ui; }
+  button { background: #3b82f6; color: #fff; border: 0; border-radius: 6px;
+    padding: 7px 14px; cursor: pointer; font-weight: 600; }
+  button:hover { background: #2f6fe0; }
+  button:disabled { background: #2c3442; cursor: wait; }
   #presult { font: 11px ui-monospace, monospace; opacity: .85; word-break: break-all; min-height: 30px; }
+  #hint { position: fixed; bottom: 12px; left: 14px; opacity: .55; z-index: 10; }
 </style>
 </head>
 <body>
-<div id="hud">
-  <strong>Archbloom 评审视口</strong>
-  <input id="path" value="D:/Word/arch0-spike/review_scene.json" spellcheck="false">
-  <button id="load">重新载入场景</button>
-  <span id="status">未载入</span>
+<div id="menubar">
+  <span id="brand">Archbloom</span>
+  <div class="menu" id="filemenu">
+    <button id="filebtn">文件</button>
+    <div class="dropdown">
+      <div class="item" data-cmd="new">新建 <kbd>Ctrl+N</kbd></div>
+      <div class="item" data-cmd="open">打开… <kbd>Ctrl+O</kbd></div>
+      <div class="sep"></div>
+      <div class="item" data-cmd="save">保存 <kbd>Ctrl+S</kbd></div>
+      <div class="item" data-cmd="saveas">另存为… <kbd>Ctrl+Shift+S</kbd></div>
+      <div class="sep"></div>
+      <div class="subparent">
+        <div class="item">导出</div>
+        <div class="submenu">
+          <div class="group">模型格式</div>
+          <div class="item" data-export="gltf">glTF 2.0 (.gltf)</div>
+          <div class="item" data-export="glb">binary glTF (.glb)</div>
+          <div class="item" data-export="fbx">FBX (.fbx)</div>
+          <div class="item" data-export="ifc">IFC4 (.ifc)</div>
+          <div class="item" data-export="html">审阅页 (.html)</div>
+          <div class="sep"></div>
+          <div class="group">渲染图片</div>
+          <div class="item" data-export="png">静帧 PNG</div>
+          <div class="item" data-export="pano">全景 PNG</div>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
+
+<div id="status">
+  <span id="docname">未命名</span>
+  <span id="scenestat">未载入</span>
+  <span id="docpath"></span>
+</div>
+
 <div id="panel">
-  <h3>出图面板</h3>
+  <h3>出图</h3>
   <label>预设
     <select id="preset">
       <option value="view">透视渲染（路径追踪）</option>
@@ -66,20 +128,33 @@
     </select>
   </label>
   <button id="shot">出图</button>
-  <div id="presult">就绪。产物落在场景文件旁。</div>
+  <div id="presult">就绪。产物落在文档旁。</div>
 </div>
+
 <div id="hint">拖动旋转 · 滚轮缩放 · 右键平移</div>
 <canvas id="c"></canvas>
+
 <script>
 const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
 const canvas = document.getElementById('c');
 const gl = canvas.getContext('webgl2', { antialias: true });
-const statusEl = document.getElementById('status');
+const docNameEl = document.getElementById('docname');
+const docPathEl = document.getElementById('docpath');
+const sceneStatEl = document.getElementById('scenestat');
 const resultEl = document.getElementById('presult');
-window.onerror = (msg) => { statusEl.textContent = `JS 异常: ${msg}`; return true; };
-if (!gl) statusEl.textContent = '需要 WebGL2（显卡驱动过旧？）';
+window.onerror = (msg) => { sceneStatEl.textContent = `JS 异常: ${msg}`; return true; };
+if (!gl) sceneStatEl.textContent = '需要 WebGL2（显卡驱动过旧？）';
 
-// ---------- 着色器：纹理 × 材质底色 × 日光/天空环境（与渲染口径近似） ----------
+// ---------- 菜单 ----------
+const filemenu = document.getElementById('filemenu');
+document.getElementById('filebtn').onclick = (e) => {
+  e.stopPropagation();
+  filemenu.classList.toggle('open');
+};
+document.addEventListener('click', () => filemenu.classList.remove('open'));
+document.querySelector('.dropdown').addEventListener('click', e => e.stopPropagation());
+
+// ---------- 着色器：纹理 × 材质底色 × 日光/天空环境 ----------
 const vs = `#version 300 es
 in vec3 aPos; in vec3 aNormal; in vec3 aColor; in vec2 aUV;
 uniform mat4 uMVP; out vec3 vColor; out vec3 vNormal; out vec2 vUV;
@@ -135,7 +210,7 @@ const dot = (a,b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
 const norm = v => { const l = Math.max(Math.hypot(...v), 1e-9); return [v[0]/l, v[1]/l, v[2]/l]; };
 
 // ---------- 轨道相机 ----------
-let yaw = 0.7, pitch = 0.5, dist = 6, target = [0, 0, 0.5];
+let yaw = 0.7, pitch = 0.5, dist = 26, target = [8, 6, 4];
 let dragging = 0;
 canvas.addEventListener('mousedown', e => dragging = e.button + 1);
 window.addEventListener('mouseup', () => dragging = 0);
@@ -151,7 +226,7 @@ window.addEventListener('mousemove', e => {
   render();
 });
 canvas.addEventListener('wheel', e => { e.preventDefault();
-  dist = Math.max(0.4, Math.min(200, dist * (e.deltaY > 0 ? 1.12 : 0.9))); render(); },
+  dist = Math.max(0.4, Math.min(400, dist * (e.deltaY > 0 ? 1.12 : 0.9))); render(); },
   { passive: false });
 function eyePos(){
   return [target[0] + dist * Math.cos(pitch) * Math.cos(yaw),
@@ -159,10 +234,11 @@ function eyePos(){
           target[2] + dist * Math.sin(pitch)];
 }
 
-// ---------- 几何：按贴图分批（UV/贴图索引与路径追踪同源） ----------
-const batches = [];  // { tex: number|-1, vao, buf, count }
-const texCache = new Map();   // 索引 → WebGLTexture | 'loading' | 'none'
+// ---------- 几何：按贴图分批 ----------
+const batches = [];
+const texCache = new Map();
 function loadTriangles(tris, texPaths){
+  texCache.clear();
   const groups = new Map();
   for (const t of tris) {
     const key = (t.tex === null || t.tex === undefined) ? -1 : t.tex;
@@ -192,9 +268,9 @@ function loadTriangles(tris, texPaths){
     gl.enableVertexAttribArray(loc.color); gl.vertexAttribPointer(loc.color, 3, gl.FLOAT, false, stride, 24);
     gl.enableVertexAttribArray(loc.uv); gl.vertexAttribPointer(loc.uv, 2, gl.FLOAT, false, stride, 36);
     batches.push({ tex: key, vao, buf, count: list.length * 3 });
-    if (key >= 0 && !texCache.has(key)) texCache.set(key, 'loading');
+    if (key >= 0) texCache.set(key, 'loading');
   }
-  // 异步补贴图（失败不炸视口：退回底色）
+  // 异步补贴图（失败退底色，不炸视口）
   for (const [key, state] of texCache) {
     if (state !== 'loading') continue;
     const p = texPaths[key];
@@ -228,7 +304,7 @@ function render(){
   gl.clearColor(0.09, 0.10, 0.13, 1);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   if (!batches.length) return;
-  const proj = perspective(0.9, canvas.width / canvas.height, 0.05, 500);
+  const proj = perspective(0.9, canvas.width / canvas.height, 0.05, 2000);
   const view = lookAt(eyePos(), target, [0, 0, 1]);
   gl.uniformMatrix4fv(loc.mvp, false, mul(proj, view));
   for (const b of batches) {
@@ -242,48 +318,143 @@ function render(){
 }
 window.addEventListener('resize', render);
 
-// ---------- 场景载入 ----------
-async function loadScene(){
-  const path = document.getElementById('path').value;
-  if (!invoke) { statusEl.textContent = 'Tauri 全局未注入（在浏览器里打开会这样；桌面窗内不应出现）'; return; }
-  statusEl.textContent = '载入中…';
+// ---------- 文档状态 ----------
+let docPath = null;
+function applyDoc(r){
+  if (!r) return;
+  docPath = r.path || null;
+  docNameEl.textContent = r.name || '未命名';
+  docPathEl.textContent = docPath || '（尚未保存）';
+  document.title = `${r.name || '未命名'} — Archbloom`;
+}
+async function refreshView(){
+  if (!invoke) { sceneStatEl.textContent = 'Tauri 全局未注入'; return; }
   try {
-    const res = await invoke('read_scene', { path });
+    const res = await invoke('read_scene');
     loadTriangles(res.triangles, res.textures || []);
+    // 首次载入时把相机对准场景包围盒中心
+    if (res.triangles.length) {
+      let lo = [1e9,1e9,1e9], hi = [-1e9,-1e9,-1e9];
+      for (const t of res.triangles) for (const p of t.p)
+        for (let i = 0; i < 3; i++) { lo[i] = Math.min(lo[i], p[i]); hi[i] = Math.max(hi[i], p[i]); }
+      const size = Math.max(hi[0]-lo[0], hi[1]-lo[1], hi[2]-lo[2], 1);
+      target = [(lo[0]+hi[0])/2, (lo[1]+hi[1])/2, (lo[2]+hi[2])/2];
+      dist = size * 2.2;
+    }
     render();
-    statusEl.textContent = `${res.name || '场景'} · ${res.triangles.length} 三角形 · ${(res.textures || []).length} 贴图`;
+    sceneStatEl.textContent = `${res.triangles.length} 三角形 · ${(res.textures || []).length} 贴图`;
   } catch (e) {
-    statusEl.textContent = `失败: ${e}`;
+    sceneStatEl.textContent = `失败: ${e}`;
   }
 }
-document.getElementById('load').onclick = loadScene;
+
+// ---------- 文件命令 ----------
+function say(msg){ resultEl.textContent = msg; }
+async function cmdNew(){
+  try { const r = await invoke('new_doc'); applyDoc(r); await refreshView(); say('已新建空白场景'); }
+  catch (e) { say(`新建失败: ${e}`); }
+}
+async function cmdOpen(){
+  try {
+    const r = await invoke('open_doc');
+    if (r && r.cancelled) { say('已取消'); return; }
+    applyDoc(r); await refreshView(); say('已打开');
+  } catch (e) { say(`打开失败: ${e}`); }
+}
+async function cmdSave(){
+  try {
+    const r = await invoke('save_doc');
+    if (r && r.cancelled) { say('已取消'); return; }
+    applyDoc(r);
+    const w = (r.warnings && r.warnings.length) ? `（${r.warnings.join('；')}）` : '';
+    say(`已保存${w}`);
+  } catch (e) { say(`保存失败: ${e}`); }
+}
+async function cmdSaveAs(){
+  try {
+    const r = await invoke('save_doc_as');
+    if (r && r.cancelled) { say('已取消'); return; }
+    applyDoc(r);
+    const w = (r.warnings && r.warnings.length) ? `（${r.warnings.join('；')}）` : '';
+    say(`已保存到\n${r.path}${w}`);
+  } catch (e) { say(`另存为失败: ${e}`); }
+}
+async function cmdExport(kind){
+  try {
+    const r = await invoke('export_scene', { kind });
+    if (r && r.cancelled) { say('已取消'); return; }
+    say(`已导出 ${kind}\n${r.path}`);
+  } catch (e) { say(`导出失败: ${e}`); }
+}
+async function exportImage(preset){
+  try {
+    const [w, h] = document.getElementById('res').value.split('x').map(Number);
+    const spp = Number(document.getElementById('spp').value);
+    const track = document.getElementById('track').value;
+    const pick = await invoke('pick_save_path', {
+      defaultName: `render_${preset}_${w}x${h}.png`,
+      filterLabel: 'PNG 图片', exts: ['png'],
+    });
+    if (pick.cancelled) { say('已取消'); return; }
+    say(`渲染中…（${preset} ${w}×${h} ${spp}spp）`);
+    const r = await invoke('render_scene', { preset, width: w, height: h, spp, renderer: track, outPath: pick.path });
+    say(`完成 ${(r.elapsed_ms / 1000).toFixed(1)}s · ${r.track}\n${r.path}`);
+  } catch (e) { say(`导出图片失败: ${e}`); }
+}
+
+// ---------- 菜单派发 + 快捷键 ----------
+document.querySelector('.dropdown').addEventListener('click', (e) => {
+  const item = e.target.closest('[data-cmd],[data-export]');
+  if (!item) return;
+  filemenu.classList.remove('open');
+  if (item.dataset.cmd) {
+    ({ new: cmdNew, open: cmdOpen, save: cmdSave, saveas: cmdSaveAs })[item.dataset.cmd]?.();
+  } else if (item.dataset.export) {
+    const k = item.dataset.export;
+    if (k === 'png') exportImage('view');
+    else if (k === 'pano') exportImage('pano');
+    else cmdExport(k);
+  }
+});
+window.addEventListener('keydown', (e) => {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  const k = e.key.toLowerCase();
+  if (k === 's') { e.preventDefault(); e.shiftKey ? cmdSaveAs() : cmdSave(); }
+  else if (k === 'o') { e.preventDefault(); cmdOpen(); }
+  else if (k === 'n') { e.preventDefault(); cmdNew(); }
+  else if (k === 'e') { e.preventDefault(); filemenu.classList.add('open'); }
+});
 
 // ---------- 出图面板 ----------
 document.getElementById('shot').onclick = async () => {
-  if (!invoke) { resultEl.textContent = 'Tauri 全局未注入'; return; }
+  if (!invoke) { say('Tauri 全局未注入'); return; }
   const btn = document.getElementById('shot');
   const [w, h] = document.getElementById('res').value.split('x').map(Number);
   const args = {
-    path: document.getElementById('path').value,
     preset: document.getElementById('preset').value,
     width: w, height: h,
     spp: Number(document.getElementById('spp').value),
     renderer: document.getElementById('track').value,
+    outPath: null,
   };
   btn.disabled = true;
-  resultEl.textContent = `渲染中…（${args.preset} ${w}×${h} ${args.spp}spp）`;
+  say(`渲染中…（${args.preset} ${w}×${h} ${args.spp}spp）`);
   try {
     const r = await invoke('render_scene', args);
-    resultEl.textContent = `完成 ${(r.elapsed_ms / 1000).toFixed(1)}s · ${r.track}\n${r.path}`;
+    say(`完成 ${(r.elapsed_ms / 1000).toFixed(1)}s · ${r.track}\n${r.path}`);
   } catch (e) {
-    resultEl.textContent = `失败: ${e}`;
+    say(`失败: ${e}`);
   } finally {
     btn.disabled = false;
   }
 };
 
-loadScene();
-render();
+// ---------- 启动 ----------
+(async () => {
+  try { applyDoc(await invoke('doc_info')); } catch (e) { /* 忽略 */ }
+  refreshView();
+  render();
+})();
 </script>
 </body>
 </html>

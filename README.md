@@ -8,10 +8,12 @@
 
 <p align="center">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-core-orange">
-  <img alt="tests" src="https://img.shields.io/badge/tests-127%20green">
+  <img alt="tests" src="https://img.shields.io/badge/tests-135%20green">
   <img alt="clippy" src="https://img.shields.io/badge/clippy-0%20warnings-blue">
   <img alt="license" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue">
 </p>
+
+<p align="center"><b>中文</b> · <a href="README.en.md">English</a></p>
 
 > **写在前面**：AI 接入 3D 的个人尝试，期望可以用于真实的 3D 工作场景，目前可初步应用，
 > 也可以用于大模型的 3D 建模与空间能力测评，个人低质作品，希望各位大佬提出意见。
@@ -63,6 +65,7 @@ archbloom-run my_scene.json
 | **建模** | 参数化体块（楼层/开间/进深）、八类家具、门窗开洞、布置变换、布尔、薄墙隔断 |
 | **表现** | CPU/GPU 双轨路径追踪（GPU ~50×）、8K 全景、VR 立体全景、漫游视频、方案对比长图 |
 | **审阅** | 自包含 HTML 查看器（WebGL2 轨道 / 物体树 / 线框 / 双哈希事实面，零依赖离线可开） |
+| **文档** | 桌面工作台带完整文件菜单（新建 / 打开 / 保存 / 另存为 / 导出）；`.al` 自包含存档把场景与贴图收进单文件，换机器直接开 |
 | **互转** | FBX 双向（Blender 桥）、IFC 导入导出、glTF/GLB、3ds Max 链、场景 JSON |
 | **agent 面** | MCP 服务（stdio）+ CLI + compose 编排层；结构化报错带步骤号，fail-closed |
 
@@ -77,9 +80,16 @@ archbloom-run my_scene.json
 
 ## 工程质量
 
-- **127 测试全绿 / clippy 0 警告**；独立代码审计 15/15 清偿（含敌对输入面负例网）
+- **135 测试全绿 / clippy 0 警告**；独立代码审计 15/15 清偿（含敌对输入面负例网）
 - 确定性渲染轨（CPU）+ 速度轨（GPU）双轨制；稳定 ID 不复用、双哈希事实面、事务进出
 - 自研核心：IR 场景格式、半边拓扑、路径追踪器、WebGL2 查看器、STEP P21 解析器
+
+## 命名备注
+
+原工程代号 Archcore，产品正名 **Archbloom**。经六候选占用调查定案（无同赛道软件产品 /
+活跃包 / 已知在先商标；npm / crates.io / PyPI 全空）。内核 crate 与 IR schema 保持
+archcore-* 命名以保兼容。已知同名共存：土耳其 Archbloom Mimarlık（建筑景观）等——
+出海前建议注册自有商标。
 
 ## 许可证
 
