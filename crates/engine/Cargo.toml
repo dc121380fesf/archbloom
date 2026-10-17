@@ -14,6 +14,8 @@ archcore-ops = { path = "../ops" }
 archcore-txn = { path = "../txn" }
 archcore-verify = { path = "../verify" }
 archcore-mesh = { path = "../mesh" }
+archcore-kernel = { path = "../kernel" }
+archcore-kernel-mesh = { path = "../kernel-mesh" }
 archcore-io = { path = "../io" }
 archcore-render = { path = "../render", features = ["gpu"] }
 serde.workspace = true

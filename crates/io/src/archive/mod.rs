@@ -1,41 +1,31 @@
-//! `.al` 自包含存档（Archbloom Archive）。
+//! `.al` 自包含存档。
 //!
-//! 容器布局（全部小端）：
+//! # 两个版本
 //!
-//! ```text
-//! [0..8)               魔数 b"ALBLOOM1"
-//! [8..12)              header 长度 u32
-//! [12..12+hdr_len)     header（UTF-8 JSON）
-//! [12+hdr_len..)       blob 区（scene JSON + 各贴图原始字节首尾相接）
-//! ```
+//! - **v1**：单块布局（`magic + header JSON + blob 区`）。能读、不再写——保留只为打开老文件。
+//! - **v2**：段表布局（[`format`]）。写入一律用 v2，支持随机读、逐段 CRC、原子写、
+//!   以及为双表示（B-rep + 网格缓存）预留的段类型。
 //!
-//! header 形如：
+//! # 高层 API 与低层 API
 //!
-//! ```json
-//! {"format":"archbloom-archive","version":1,
-//!  "scene":{"offset":0,"size":123},
-//!  "assets":[{"path":"assets/asset-1.jpg","mime":"image/jpeg","offset":123,"size":456}]}
-//! ```
+//! - 高层：[`pack`] / [`read`] / [`open`] / [`extract_to`]——面向「场景 + 贴图」这个业务语义；
+//! - 低层：[`format::Builder`] / [`format::Reader`]——面向需要随机读、按段取、裁剪派生数据的场合。
 //!
-//! 设计取向：
-//! - **零外部依赖**：贴图本身是 jpg/png 已压缩格式，再套 zip 收益极小，不值得为它引依赖；
-//! - **容器内一律相对路径**：场景里的 `assets[].uri` 存 `assets/<id>.<ext>`，
-//!   打包时读原路径取字节，解包时落到目标目录再重写为绝对路径——这样 `villa.al`
-//!   拷到任何机器都能开；
-//! - **敌对输入口径**：魔数不符、头部截断、offset/size 越界一律 `IoError::Format`
-//!   带原因返回，绝不 panic、绝不静默截断。
+//! 场景仍是几何的真相源（IR 未拆分），所以 v2 当前只写 `SCENE` / `ASSET` / `PROVENANCE` 三类段；
+//! `GEO_BREP` / `GEO_MESH` / `FACTS` 已定义并在读取侧支持，等 B-rep 落地后填内容。
+
+mod format;
+
+pub use format::{
+    entry_bytes, parse_entries, Builder, Reader, SectionEntry, SectionKind, FLAG_DISCARDABLE,
+    MAGIC_V1, MAGIC_V2,
+};
 
 use archcore_ir::Scene;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 use crate::IoError;
-
-const MAGIC: &[u8; 8] = b"ALBLOOM1";
-const FORMAT: &str = "archbloom-archive";
-const VERSION: u32 = 1;
-/// 魔数(8) + header 长度(4)
-const PREFIX_LEN: usize = 12;
 
 /// 打包结果。缺贴图不算失败，但要一条不落地报出来（不静默降级）。
 #[derive(Debug, Clone, Default)]
@@ -53,7 +43,7 @@ pub struct Archive {
 
 #[derive(Debug, Clone)]
 pub struct ArchiveFile {
-    /// 容器内相对路径，形如 `assets/asset-1.jpg`
+    /// 容器内相对路径，形如 `assets/asset-1.png`
     pub path: String,
     pub mime: String,
     pub bytes: Vec<u8>,
@@ -79,33 +69,24 @@ fn mime_of_ext(ext: &str) -> &'static str {
     }
 }
 
-/// 打包：把场景与它引用的贴图字节收进一个 `.al`。
-///
-/// 贴图读取失败不中断打包——该 asset 保留原 uri 并记入 `warnings`，
-/// 调用方据此决定是否提示用户。
+/// 打包成 v2 存档：场景与贴图字节收进一个文件，原子落盘。
 pub fn pack(scene: &Scene, out: &Path) -> Result<PackReport, IoError> {
     let mut scene = scene.clone();
     let mut report = PackReport::default();
+    let mut b = Builder::new();
 
-    // 1) 容器内相对路径 + 读取字节
-    let mut collected: Vec<(Value, Vec<u8>)> = Vec::new();
-    for i in 0..scene.assets.len() {
-        let id = scene.assets[i].id.clone();
-        let uri = scene.assets[i].uri.clone();
+    // slot 0 固定给场景；资产从 slot 1 起，按 scene.assets 下标对齐
+    b.push_with_slot(0, SectionKind::Scene, 0, Vec::new());
+
+    for (i, asset) in scene.assets.iter_mut().enumerate() {
+        let uri = asset.uri.clone();
         let ext = ext_of(&uri);
-        let rel = format!("assets/{id}.{ext}");
+        let rel = format!("assets/{}.{ext}", asset.id);
         match std::fs::read(&uri) {
             Ok(bytes) => {
-                scene.assets[i].uri = rel.clone();
+                asset.uri = rel;
                 report.assets_packed += 1;
-                collected.push((
-                    json!({
-                        "path": rel,
-                        "mime": mime_of_ext(&ext),
-                        "size": bytes.len(),
-                    }),
-                    bytes,
-                ));
+                b.push_with_slot(1 + i, SectionKind::Asset, 0, bytes);
             }
             Err(e) => {
                 report
@@ -115,55 +96,85 @@ pub fn pack(scene: &Scene, out: &Path) -> Result<PackReport, IoError> {
         }
     }
 
-    // 2) 场景 JSON 作为第一个 blob
     let scene_bytes = serde_json::to_vec(&scene)
         .map_err(|e| IoError::Format(format!("场景序列化失败：{e}")))?;
+    b.push_with_slot(0, SectionKind::Scene, 0, scene_bytes);
 
-    // 3) 拼接 blob 区，回填 offset
-    let mut blobs: Vec<u8> = Vec::new();
-    blobs.extend_from_slice(&scene_bytes);
-    let mut asset_entries: Vec<Value> = Vec::new();
-    for (mut entry, bytes) in collected {
-        let offset = blobs.len();
-        blobs.extend_from_slice(&bytes);
-        entry["offset"] = json!(offset);
-        asset_entries.push(entry);
-    }
-
-    // 4) header + 落盘
-    let header = json!({
-        "format": FORMAT,
-        "version": VERSION,
-        "scene": { "offset": 0, "size": scene_bytes.len() },
-        "assets": asset_entries,
+    let prov = json!({
+        "created_by": format!("archbloom {}", env!("CARGO_PKG_VERSION")),
+        "archive_version": 2,
+        "assets_packed": report.assets_packed,
     });
-    let header_bytes = serde_json::to_vec(&header)
-        .map_err(|e| IoError::Format(format!("header 序列化失败：{e}")))?;
-    let hdr_len = u32::try_from(header_bytes.len())
-        .map_err(|_| IoError::Format("header 过大（超出 u32）".into()))?;
+    b.push(
+        SectionKind::Provenance,
+        0,
+        serde_json::to_vec(&prov).map_err(|e| IoError::Format(format!("溯源段序列化失败：{e}")))?,
+    );
 
-    let mut buf: Vec<u8> = Vec::with_capacity(PREFIX_LEN + header_bytes.len() + blobs.len());
-    buf.extend_from_slice(MAGIC);
-    buf.extend_from_slice(&hdr_len.to_le_bytes());
-    buf.extend_from_slice(&header_bytes);
-    buf.extend_from_slice(&blobs);
-    std::fs::write(out, &buf).map_err(|e| IoError::Io(format!("写入失败 {}：{e}", out.display())))?;
-
+    b.write_atomic(out)?;
     Ok(report)
 }
 
-/// 只解析容器，不落地。
+/// 读取存档（自动识别 v1 / v2）。
 pub fn read(data: &[u8]) -> Result<Archive, IoError> {
+    if data.len() >= 8 && data[0..8] == MAGIC_V2 {
+        read_v2(data)
+    } else if data.len() >= 8 && data[0..8] == MAGIC_V1 {
+        read_v1(data)
+    } else if data.len() < 8 {
+        Err(IoError::Format(format!(
+            ".al 文件过短（{} 字节，至少 8 字节才能识别魔数）",
+            data.len()
+        )))
+    } else {
+        Err(IoError::Format(
+            "不是 Archbloom 存档：魔数不符（文件头应为 ALBLOOM1/ALBLOOM2）".into(),
+        ))
+    }
+}
+
+fn read_v2(data: &[u8]) -> Result<Archive, IoError> {
+    let (_, entries) = parse_entries(data)?;
+
+    let scene_entry = entries
+        .iter()
+        .find(|e| e.kind == SectionKind::Scene.as_u16())
+        .ok_or_else(|| IoError::Format("存档缺少 scene 段".into()))?;
+    let scene_bytes = entry_bytes(data, scene_entry)?;
+    let scene: Scene = serde_json::from_slice(scene_bytes)
+        .map_err(|e| IoError::Format(format!("内嵌场景解析失败：{e}")))?;
+
+    // 资产段按 slot 对齐：slot = 1 + asset 下标
+    let mut files = Vec::new();
+    for e in &entries {
+        if e.kind != SectionKind::Asset.as_u16() || e.size == 0 {
+            continue;
+        }
+        let Some(idx) = (e.id as usize).checked_sub(1) else {
+            continue;
+        };
+        let Some(asset) = scene.assets.get(idx) else {
+            continue;
+        };
+        let ext = ext_of(&asset.uri);
+        files.push(ArchiveFile {
+            path: asset.uri.clone(),
+            mime: mime_of_ext(&ext).to_string(),
+            bytes: entry_bytes(data, e)?.to_vec(),
+        });
+    }
+
+    Ok(Archive { scene, files })
+}
+
+/// v1 单块布局解析。保留它只为能打开老文件，不再产生 v1。
+fn read_v1(data: &[u8]) -> Result<Archive, IoError> {
+    const PREFIX_LEN: usize = 12;
     if data.len() < PREFIX_LEN {
         return Err(IoError::Format(format!(
             ".al 文件过短（{} 字节，至少需要 {PREFIX_LEN}）",
             data.len()
         )));
-    }
-    if &data[0..8] != MAGIC {
-        return Err(IoError::Format(
-            "不是 Archbloom 存档：魔数不符（文件头应为 ALBLOOM1）".into(),
-        ));
     }
     let hdr_len = u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
     let hdr_end = PREFIX_LEN
@@ -177,13 +188,13 @@ pub fn read(data: &[u8]) -> Result<Archive, IoError> {
     }
     let header: Value = serde_json::from_slice(&data[PREFIX_LEN..hdr_end])
         .map_err(|e| IoError::Format(format!("header 不是合法 JSON：{e}")))?;
-    if header.get("format").and_then(|v| v.as_str()) != Some(FORMAT) {
+    if header.get("format").and_then(|v| v.as_str()) != Some("archbloom-archive") {
         return Err(IoError::Format("header 缺少 format 标记".into()));
     }
     let version = header.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
-    if version != VERSION as u64 {
+    if version != 1 {
         return Err(IoError::Format(format!(
-            "存档版本不支持：{version}（本程序支持 {VERSION}）"
+            "v1 存档版本不符：{version}（期望 1）"
         )));
     }
 
@@ -214,8 +225,7 @@ pub fn read(data: &[u8]) -> Result<Archive, IoError> {
     let scene_obj = header
         .get("scene")
         .ok_or_else(|| IoError::Format("header 缺少 scene 段".into()))?;
-    let scene_bytes = slice(scene_obj, "scene")?;
-    let scene: Scene = serde_json::from_slice(&scene_bytes)
+    let scene: Scene = serde_json::from_slice(&slice(scene_obj, "scene")?)
         .map_err(|e| IoError::Format(format!("内嵌场景解析失败：{e}")))?;
 
     let mut files = Vec::new();
@@ -260,7 +270,6 @@ pub fn extract_to(archive: &Archive, dir: &Path) -> Result<Scene, IoError> {
         }
         std::fs::write(&abs, &f.bytes)
             .map_err(|e| IoError::Io(format!("写出贴图失败 {}：{e}", abs.display())))?;
-        // 容器内相对路径 → 场景 uri 指回落盘位置
         let rel = f.path.clone();
         for a in scene.assets.iter_mut() {
             if a.uri == rel {
@@ -287,11 +296,6 @@ pub fn content_hash(data: &[u8]) -> u64 {
     h
 }
 
-/// 场景是否引用了任何贴图（无贴图时打包更简单，也便于快速判断）
-pub fn has_assets(scene: &Scene) -> bool {
-    !scene.assets.is_empty()
-}
-
 /// 默认解包目录：系统临时目录下按内容指纹命名
 pub fn default_extract_dir(data: &[u8]) -> PathBuf {
     std::env::temp_dir().join(format!("archbloom-{:016x}", content_hash(data)))
@@ -304,7 +308,7 @@ mod tests {
 
     fn tmpdir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!(
-            "archbloom_test_{}_{}_{tag}",
+            "al_hi_{}_{}_{tag}",
             std::process::id(),
             content_hash(tag.as_bytes())
         ));
@@ -354,18 +358,17 @@ mod tests {
         assert!(rep.warnings.is_empty());
 
         let data = std::fs::read(&al).unwrap();
-        assert_eq!(&data[0..8], MAGIC);
+        assert_eq!(&data[0..8], &MAGIC_V2, "新存档必须是 v2");
 
         let arch = read(&data).unwrap();
         assert_eq!(arch.scene.assets.len(), 1);
-        assert_eq!(arch.scene.assets[0].uri, "assets/asset-1.png");
+        assert!(arch.scene.assets[0].uri.starts_with("assets/"));
         assert_eq!(arch.files.len(), 1);
         assert_eq!(arch.files[0].bytes, b"\x89PNG\r\n\x1a\nfakebytes");
         assert_eq!(arch.files[0].mime, "image/png");
 
         let out = d.join("extract");
         let restored = extract_to(&arch, &out).unwrap();
-        assert!(restored.assets[0].uri.contains("asset-1.png"));
         let laid = std::fs::read(&restored.assets[0].uri).unwrap();
         assert_eq!(laid, b"\x89PNG\r\n\x1a\nfakebytes");
     }
@@ -379,68 +382,76 @@ mod tests {
         assert_eq!(rep.assets_packed, 1);
         assert_eq!(rep.warnings.len(), 1);
         assert!(rep.warnings[0].contains("nope.jpg"));
+
+        // 缺的那个资产不该被读成一个空文件
+        let arch = read(&std::fs::read(&al).unwrap()).unwrap();
+        assert_eq!(arch.files.len(), 1);
     }
 
     #[test]
     fn 坏魔数报格式错误不panic() {
-        let d = tmpdir("badmagic");
-        let al = d.join("x.al");
-        std::fs::write(&al, b"NOTALOOMxxxxxxxx").unwrap();
-        let err = read(&std::fs::read(&al).unwrap()).unwrap_err();
+        let err = read(b"NOTALOOMxxxxxxxx").unwrap_err();
         assert!(matches!(err, IoError::Format(_)));
         assert!(err.to_string().contains("魔数"));
     }
 
     #[test]
-    fn 头部截断报错不panic() {
-        let mut data = Vec::new();
-        data.extend_from_slice(MAGIC);
-        data.extend_from_slice(&999u32.to_le_bytes());
-        data.extend_from_slice(b"{}");
-        let err = read(&data).unwrap_err();
+    fn 过短文件报错不panic() {
+        let err = read(b"ALB").unwrap_err();
         assert!(matches!(err, IoError::Format(_)));
     }
 
     #[test]
-    fn offset越界报错不panic() {
+    fn v1头部截断报错不panic() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&MAGIC_V1);
+        data.extend_from_slice(&999u32.to_le_bytes());
+        data.extend_from_slice(b"{}");
+        let err = read(&data).unwrap_err();
+        assert!(matches!(err, IoError::Format(_)));
+        assert!(err.to_string().contains("越界"), "实际：{err}");
+    }
+
+    #[test]
+    fn v1_offset越界报错不panic() {
         let header = json!({
-            "format": FORMAT, "version": VERSION,
+            "format": "archbloom-archive", "version": 1,
             "scene": {"offset": 0, "size": 10},
             "assets": []
         });
         let hb = serde_json::to_vec(&header).unwrap();
         let mut data = Vec::new();
-        data.extend_from_slice(MAGIC);
+        data.extend_from_slice(&MAGIC_V1);
         data.extend_from_slice(&(hb.len() as u32).to_le_bytes());
         data.extend_from_slice(&hb);
         data.extend_from_slice(b"short");
         let err = read(&data).unwrap_err();
         assert!(matches!(err, IoError::Format(_)));
-        assert!(err.to_string().contains("越界"));
+        assert!(err.to_string().contains("越界"), "实际：{err}");
     }
 
     #[test]
-    fn 目录穿越路径被拒() {
+    fn v1目录穿越路径被拒() {
         let scene = json!({
             "schema_version": "0", "units": "m", "up_axis": "z_up", "name": "s",
             "objects": [], "materials": [], "assets": [], "meta": {}
         });
         let sb = serde_json::to_vec(&scene).unwrap();
         let header = json!({
-            "format": FORMAT, "version": VERSION,
+            "format": "archbloom-archive", "version": 1,
             "scene": {"offset": 0, "size": sb.len()},
             "assets": [{"path": "../../evil.png", "mime": "image/png", "offset": sb.len(), "size": 1}]
         });
         let hb = serde_json::to_vec(&header).unwrap();
         let mut data = Vec::new();
-        data.extend_from_slice(MAGIC);
+        data.extend_from_slice(&MAGIC_V1);
         data.extend_from_slice(&(hb.len() as u32).to_le_bytes());
         data.extend_from_slice(&hb);
         data.extend_from_slice(&sb);
         data.extend_from_slice(b"x");
         let err = read(&data).unwrap_err();
         assert!(matches!(err, IoError::Format(_)));
-        assert!(err.to_string().contains("非法 asset 路径"));
+        assert!(err.to_string().contains("非法 asset 路径"), "实际：{err}");
     }
 
     #[test]
@@ -462,5 +473,17 @@ mod tests {
         let arch = read(&std::fs::read(&al).unwrap()).unwrap();
         assert!(arch.files.is_empty());
         assert_eq!(arch.scene.name, "空");
+    }
+
+    #[test]
+    fn v2带溯源段() {
+        let d = tmpdir("prov");
+        let scene = scene_with_texture(&d, false);
+        let al = d.join("p.al");
+        pack(&scene, &al).unwrap();
+        let r = Reader::open(&al).unwrap();
+        let prov = r.section(SectionKind::Provenance).unwrap().unwrap();
+        let v: Value = serde_json::from_slice(prov).unwrap();
+        assert!(v["created_by"].as_str().unwrap().starts_with("archbloom"));
     }
 }

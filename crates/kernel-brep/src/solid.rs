@@ -1,0 +1,378 @@
+//! 实体表示：解析面 + 离散边界。
+//!
+//! # 表示取舍
+//!
+//! 严格 B-rep 里，圆柱侧面是**一个**面，边界是两条圆曲线。那需要「曲线环」的拓扑，
+//! 复杂度立刻上一个台阶。
+//!
+//! 这里用**带解析标注的离散拓扑**：
+//! - 每个面有一个解析曲面（[`Surface`]），但边界用顶点环（便于三角化与拓扑检查）；
+//! - 圆柱侧面离散成 N 个四边形面，它们**共享同一个 `Cylinder` 标注**；
+//! - 体积/面积走**闭式解**，不从三角化量。
+//!
+//! 好处：拓扑简单、tessellate 直接可用、体积依然精确。
+//! 代价：STEP 输出时需要把共享同一圆柱标注的相邻面**合并回一个 CYLINDRICAL_SURFACE**
+//! （这是 G 阶段的事，不是现在的）。
+//!
+//! # 为什么体积必须是闭式解
+//!
+//! 「Φ10 孔」的精确体积是 π·r²·h。如果从三角化量，结果依赖离散段数——
+//! 那就不是定义，是逼近。K3 闸门要的就是这个区别。
+
+use std::f64::consts::PI;
+
+use archcore_kernel::{Point3, Vector3};
+
+use crate::geom::{cross, dot, normalize, sub, Surface};
+
+/// 一个面：解析曲面 + 顶点环（逆时针为外法线朝外）。
+#[derive(Clone, Debug)]
+pub struct Face {
+    pub surface: Surface,
+    pub verts: Vec<u32>,
+}
+
+/// 实体：顶点池 + 面表。
+///
+/// 边表暂不单列——D 阶段的拓扑检查（水密、欧拉公式）只需要顶点/面。
+/// 边的显式表示等倒角（阶段 I）真正需要时再加，避免过早建模。
+#[derive(Clone, Debug, Default)]
+pub struct Solid {
+    pub verts: Vec<Point3>,
+    pub faces: Vec<Face>,
+    /// 构造器给出的闭式体积（立方米）。None 表示未知，需要三角化估算。
+    pub analytic_volume: Option<f64>,
+    /// 构造器给出的闭式面积。
+    pub analytic_area: Option<f64>,
+}
+
+impl Solid {
+    pub fn push_vert(&mut self, p: Point3) -> u32 {
+        self.verts.push(p);
+        (self.verts.len() - 1) as u32
+    }
+
+    pub fn push_face(&mut self, surface: Surface, verts: Vec<u32>) -> usize {
+        self.faces.push(Face { surface, verts });
+        self.faces.len() - 1
+    }
+
+    /// 轴向包围盒。
+    pub fn bbox(&self) -> (Point3, Point3) {
+        let mut lo = [f64::MAX; 3];
+        let mut hi = [f64::MIN; 3];
+        for p in &self.verts {
+            for i in 0..3 {
+                lo[i] = lo[i].min(p[i]);
+                hi[i] = hi[i].max(p[i]);
+            }
+        }
+        if self.verts.is_empty() {
+            return ([0.0; 3], [0.0; 3]);
+        }
+        (lo, hi)
+    }
+
+    /// 是否水密：每条无向边恰好被两个面共享。
+    pub fn is_watertight(&self) -> bool {
+        use std::collections::HashMap;
+        let mut edges: HashMap<(u32, u32), u32> = HashMap::new();
+        for f in &self.faces {
+            let n = f.verts.len();
+            if n < 3 {
+                return false;
+            }
+            for i in 0..n {
+                let a = f.verts[i];
+                let b = f.verts[(i + 1) % n];
+                if a == b {
+                    return false;
+                }
+                let k = if a < b { (a, b) } else { (b, a) };
+                *edges.entry(k).or_insert(0) += 1;
+            }
+        }
+        !edges.is_empty() && edges.values().all(|c| *c == 2)
+    }
+
+    /// 欧拉示性数 V − E + F。闭合单连通实体应为 2。
+    pub fn euler_characteristic(&self) -> i64 {
+        use std::collections::HashSet;
+        let mut edges: HashSet<(u32, u32)> = HashSet::new();
+        for f in &self.faces {
+            let n = f.verts.len();
+            for i in 0..n {
+                let a = f.verts[i];
+                let b = f.verts[(i + 1) % n];
+                edges.insert(if a < b { (a, b) } else { (b, a) });
+            }
+        }
+        self.verts.len() as i64 - edges.len() as i64 + self.faces.len() as i64
+    }
+
+    /// 三角化：每个面按扇形剖分。
+    ///
+    /// `tol` 用于 B-rep 后端的曲面细分；这里的面边界已经是离散折线，
+    /// 所以容差只影响"这个实体是否已经够细"的判断，不做再细分（见 [`super::kernel`]）。
+    pub fn triangulate(&self) -> (Vec<Point3>, Vec<Vector3>, Vec<u32>) {
+        let pos = self.verts.clone();
+        let mut nrm: Vec<Vector3> = vec![[0.0, 0.0, 0.0]; pos.len()];
+        let mut idx: Vec<u32> = Vec::new();
+
+        for f in &self.faces {
+            let n = f.verts.len();
+            if n < 3 {
+                continue;
+            }
+            // 面法线：优先用解析曲面在质心处的外法线，退化时用顶点叉积
+            let centroid = centroid_of(&self.verts, &f.verts);
+            let face_n = f
+                .surface
+                .normal_at(centroid)
+                .or_else(|| polygon_normal(&self.verts, &f.verts))
+                .unwrap_or([0.0, 0.0, 1.0]);
+
+            for i in 1..n - 1 {
+                idx.extend_from_slice(&[f.verts[0], f.verts[i], f.verts[i + 1]]);
+            }
+            for v in &f.verts {
+                if let Some(slot) = nrm.get_mut(*v as usize) {
+                    *slot = face_n;
+                }
+            }
+        }
+        (pos, nrm, idx)
+    }
+}
+
+fn centroid_of(verts: &[Point3], ring: &[u32]) -> Point3 {
+    let mut s = [0.0, 0.0, 0.0];
+    let mut n = 0.0;
+    for i in ring {
+        if let Some(p) = verts.get(*i as usize) {
+            s[0] += p[0];
+            s[1] += p[1];
+            s[2] += p[2];
+            n += 1.0;
+        }
+    }
+    if n == 0.0 {
+        return [0.0; 3];
+    }
+    [s[0] / n, s[1] / n, s[2] / n]
+}
+
+fn polygon_normal(verts: &[Point3], ring: &[u32]) -> Option<Vector3> {
+    if ring.len() < 3 {
+        return None;
+    }
+    let a = *verts.get(ring[0] as usize)?;
+    let b = *verts.get(ring[1] as usize)?;
+    let c = *verts.get(ring[2] as usize)?;
+    normalize(cross(sub(b, a), sub(c, a)))
+}
+
+/// 长方体（轴对齐）。6 个平面面，逆时针朝外。
+pub fn box_solid(min: Point3, max: Point3) -> Solid {
+    let mut s = Solid::default();
+    let v = [
+        s.push_vert([min[0], min[1], min[2]]),
+        s.push_vert([max[0], min[1], min[2]]),
+        s.push_vert([max[0], max[1], min[2]]),
+        s.push_vert([min[0], max[1], min[2]]),
+        s.push_vert([min[0], min[1], max[2]]),
+        s.push_vert([max[0], min[1], max[2]]),
+        s.push_vert([max[0], max[1], max[2]]),
+        s.push_vert([min[0], max[1], max[2]]),
+    ];
+    let plane = |n: Vector3| Surface::Plane {
+        origin: [0.0, 0.0, 0.0],
+        normal: n,
+    };
+    // 逆时针（从外看）
+    s.push_face(plane([0.0, 0.0, -1.0]), vec![v[0], v[3], v[2], v[1]]); // -Z
+    s.push_face(plane([0.0, 0.0, 1.0]), vec![v[4], v[5], v[6], v[7]]); // +Z
+    s.push_face(plane([0.0, -1.0, 0.0]), vec![v[0], v[1], v[5], v[4]]); // -Y
+    s.push_face(plane([0.0, 1.0, 0.0]), vec![v[2], v[3], v[7], v[6]]); // +Y
+    s.push_face(plane([-1.0, 0.0, 0.0]), vec![v[0], v[4], v[7], v[3]]); // -X
+    s.push_face(plane([1.0, 0.0, 0.0]), vec![v[1], v[2], v[6], v[5]]); // +X
+
+    let dx = max[0] - min[0];
+    let dy = max[1] - min[1];
+    let dz = max[2] - min[2];
+    s.analytic_volume = Some(dx * dy * dz);
+    s.analytic_area = Some(2.0 * (dx * dy + dy * dz + dz * dx));
+    s
+}
+
+/// 圆柱体（轴平行 Z），侧面离散成 `segments` 个四边形面，全部标注为同一个圆柱面。
+///
+/// 为什么侧面不合成一个面：那需要「曲线环」拓扑（边是圆而非折线）。
+/// 这里用离散边界 + 共享解析标注，STEP 输出时再合并（G 阶段）。
+pub fn cylinder_solid(base: Point3, radius: f64, height: f64, segments: usize) -> Solid {
+    let n = segments.max(3);
+    let mut s = Solid::default();
+
+    let bottom: Vec<u32> = (0..n)
+        .map(|i| {
+            let a = TAU * (i as f64) / (n as f64);
+            s.push_vert([base[0] + radius * a.cos(), base[1] + radius * a.sin(), base[2]])
+        })
+        .collect();
+    let top: Vec<u32> = (0..n)
+        .map(|i| {
+            let a = TAU * (i as f64) / (n as f64);
+            s.push_vert([
+                base[0] + radius * a.cos(),
+                base[1] + radius * a.sin(),
+                base[2] + height,
+            ])
+        })
+        .collect();
+
+    // 底面（法线 -Z）：环反向
+    let mut bot_ring: Vec<u32> = bottom.clone();
+    bot_ring.reverse();
+    s.push_face(
+        Surface::Plane {
+            origin: base,
+            normal: [0.0, 0.0, -1.0],
+        },
+        bot_ring,
+    );
+    // 顶面（法线 +Z）
+    s.push_face(
+        Surface::Plane {
+            origin: [base[0], base[1], base[2] + height],
+            normal: [0.0, 0.0, 1.0],
+        },
+        top.clone(),
+    );
+
+    // 侧面：n 个四边形，共享同一圆柱标注
+    let cyl = Surface::Cylinder {
+        origin: base,
+        axis: [0.0, 0.0, 1.0],
+        radius,
+    };
+    for i in 0..n {
+        let j = (i + 1) % n;
+        s.push_face(cyl, vec![bottom[i], bottom[j], top[j], top[i]]);
+    }
+
+    s.analytic_volume = Some(PI * radius * radius * height);
+    // 侧面积 + 两个端面
+    s.analytic_area = Some(TAU * radius * height + 2.0 * PI * radius * radius);
+    s
+}
+
+const TAU: f64 = std::f64::consts::TAU;
+
+/// 按容差算圆柱侧面需要多少段：弦高 ≤ tol。
+///
+/// 弦高 = r(1 − cos(θ/2))，取 θ = 2π/n → n ≥ π / acos(1 − tol/r)。
+pub fn segments_for_tolerance(radius: f64, tol: f64) -> usize {
+    if radius <= 0.0 || tol <= 0.0 || tol >= radius {
+        return 8;
+    }
+    let theta = 2.0 * (1.0 - tol / radius).acos();
+    if theta <= 0.0 {
+        return 256;
+    }
+    ((TAU / theta).ceil() as usize).clamp(8, 256)
+}
+
+/// 三角化后的体积（散度定理），用于与闭式解交叉验证。
+pub fn volume_from_mesh(positions: &[Point3], indices: &[u32]) -> f64 {
+    let mut sum = 0.0;
+    for tri in indices.as_chunks::<3>().0 {
+        let (Some(a), Some(b), Some(c)) = (
+            positions.get(tri[0] as usize),
+            positions.get(tri[1] as usize),
+            positions.get(tri[2] as usize),
+        ) else {
+            continue;
+        };
+        sum += dot(*a, cross(*b, *c));
+    }
+    (sum / 6.0).abs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geom::len;
+
+    #[test]
+    fn 长方体体积面积精确() {
+        let s = box_solid([0.0, 0.0, 0.0], [2.0, 3.0, 4.0]);
+        assert!((s.analytic_volume.unwrap() - 24.0).abs() < 1e-12);
+        assert!((s.analytic_area.unwrap() - 2.0 * (6.0 + 12.0 + 8.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn 长方体水密且欧拉数为二() {
+        let s = box_solid([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        assert!(s.is_watertight());
+        assert_eq!(s.euler_characteristic(), 2);
+    }
+
+    #[test]
+    fn 圆柱体积走闭式解() {
+        let r = 0.005; // Φ10mm
+        let h = 0.020;
+        let s = cylinder_solid([0.0, 0.0, 0.0], r, h, 64);
+        let exact = PI * r * r * h;
+        let got = s.analytic_volume.unwrap();
+        assert!((got - exact).abs() / exact < 1e-12, "闭式解必须精确，got={got}");
+    }
+
+    #[test]
+    fn 圆柱离散网格体积随段数逼近闭式解() {
+        let r = 0.005;
+        let h = 0.020;
+        let exact = PI * r * r * h;
+        let mut prev_err = f64::MAX;
+        for segs in [8usize, 16, 32, 64] {
+            let s = cylinder_solid([0.0, 0.0, 0.0], r, h, segs);
+            let (pos, _, idx) = s.triangulate();
+            let mesh_vol = volume_from_mesh(&pos, &idx);
+            let err = (mesh_vol - exact).abs() / exact;
+            assert!(
+                err < prev_err,
+                "{segs} 段的误差 {err:.6} 应小于上一档 {prev_err:.6}（离散应收敛）"
+            );
+            prev_err = err;
+        }
+    }
+
+    #[test]
+    fn 圆柱水密() {
+        let s = cylinder_solid([0.0, 0.0, 0.0], 1.0, 2.0, 16);
+        assert!(s.is_watertight());
+    }
+
+    #[test]
+    fn 容差越小段数越多() {
+        let coarse = segments_for_tolerance(1.0, 0.1);
+        let fine = segments_for_tolerance(1.0, 0.001);
+        assert!(fine > coarse, "细容差应给更多段：{fine} vs {coarse}");
+        assert!(coarse >= 8 && fine <= 256);
+    }
+
+    #[test]
+    fn 非法容差回落到默认段数() {
+        assert_eq!(segments_for_tolerance(1.0, 0.0), 8);
+        assert_eq!(segments_for_tolerance(0.0, 0.1), 8);
+        assert_eq!(segments_for_tolerance(1.0, 2.0), 8);
+    }
+
+    #[test]
+    fn 三角化顶点法线非零() {
+        let s = box_solid([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        let (_, nrm, _) = s.triangulate();
+        for n in &nrm {
+            assert!(len(*n) > 0.9, "法线应已归一化，实际 {n:?}");
+        }
+    }
+}

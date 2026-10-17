@@ -1,0 +1,12 @@
+[package]
+name = "archcore-kernel-mesh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+archcore-kernel = { path = "../kernel" }
+archcore-mesh = { path = "../mesh" }
+
+[lints]
+workspace = true

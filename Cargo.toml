@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/ir", "crates/ops", "crates/txn", "crates/verify", "crates/mesh", "crates/engine", "crates/mcp", "crates/io", "crates/render", "app/src-tauri"]
+members = ["crates/ir", "crates/ops", "crates/txn", "crates/verify", "crates/mesh", "crates/kernel", "crates/kernel-mesh", "crates/kernel-brep", "crates/engine", "crates/mcp", "crates/io", "crates/render", "app/src-tauri"]
 
 [workspace.package]
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 

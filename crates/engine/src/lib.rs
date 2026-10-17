@@ -5,7 +5,8 @@
 use archcore_ir::{
     AssetRef, Geometry, Id, Material, Object, ObjectKind, Scene, ShadingModel, Transform, Units, UpAxis,
 };
-use archcore_mesh::{BoolOp, Mesh, MeshError};
+use archcore_mesh::{Mesh, MeshError};
+use archcore_kernel::{BoolOp as KernelBoolOp, CancelToken, GeometryKernel, KernelError};
 use archcore_ops::{
     register_builtins, CapabilityManifest, GeoFacts, OpAnnotations, OpCategory, OpDef, OpError,
     OpRegistry, OpReport, OpSpec, ParamSpec,
@@ -14,6 +15,34 @@ use archcore_txn::History;
 use archcore_verify::{default_registry, Finding, VerifyRegistry};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
+/// 内核错误 → 操作错误。
+///
+/// 保留内核给的可执行建议，不把它降级成无信息量的 "internal error"——
+/// agent 拿到建议才能自己重试。
+fn kernel_err(e: KernelError) -> OpError {
+    match e {
+        KernelError::UnknownSolid { id } => OpError::NotFound {
+            what: format!("solid#{}", id.0),
+            id: format!("solid#{}", id.0),
+        },
+        KernelError::Cancelled => OpError::Internal {
+            reason: "几何操作被取消".into(),
+        },
+        KernelError::Unsupported { feature, .. } => OpError::BadRequest {
+            param: "capability".into(),
+            reason: format!("后端不支持 {feature}"),
+        },
+        // 几何做不下去属「前置条件不满足」（输入几何本身不合适），
+        // 与「参数格式错」是两回事——上层与 agent 需要区分。
+        other @ (KernelError::Degenerate { .. }
+        | KernelError::ToleranceExceeded { .. }
+        | KernelError::TopologyBroken { .. }) => OpError::Precondition {
+            reason: other.to_string(),
+        },
+    }
+}
 
 #[derive(Debug)]
 pub enum EngineError {
@@ -76,6 +105,10 @@ pub struct Engine {
     verify: VerifyRegistry,
     previews: BTreeMap<String, PreviewRecord>,
     preview_seq: u64,
+    /// 几何内核（默认网格后端；B-rep 接入后可由 [`Engine::with_kernel`] 替换）。
+    ///
+    /// 引擎的业务逻辑只通过 [`GeometryKernel`] 端口碰几何，不直接依赖具体后端。
+    kernel: Arc<Mutex<dyn GeometryKernel>>,
 }
 
 /// 稳定 ID 分配（委托 ops 的单调计数器，永不复用）
@@ -134,12 +167,21 @@ fn get_mesh(scene: &Scene, id: &str) -> Result<Geometry, OpError> {
         })
 }
 
-fn put_mesh(scene: &mut Scene, id: &str, positions: Vec<[f64; 3]>, indices: Vec<u32>) -> Result<(), OpError> {
+fn put_mesh(
+    kernel: &Arc<Mutex<dyn GeometryKernel>>,
+    scene: &mut Scene,
+    id: &str,
+    positions: Vec<[f64; 3]>,
+    indices: Vec<u32>,
+) -> Result<(), OpError> {
     // 写回前几何健全性回检（审计 #5）：坏几何不得静默入 IR
-    archcore_mesh::Mesh::from_indexed(positions.clone(), &indices).map_err(|e| OpError::BadRequest {
-        param: "geometry".into(),
-        reason: format!("写回几何不健全: {e:?}"),
-    })?;
+    // 校验收口到内核端口：能不被后端接受，标准由后端定（网格查流形，B-rep 还要求水密）
+    {
+        let mut k = kernel.lock().map_err(|e| OpError::Internal {
+            reason: format!("内核锁不可用：{e}"),
+        })?;
+        k.validate_mesh(&positions, &indices).map_err(kernel_err)?;
+    }
     if let Some(o) = scene.objects.iter_mut().find(|o| o.id == id) {
         if let ObjectKind::Mesh { geometry, .. } = &mut o.kind {
             geometry.positions = positions;
@@ -202,7 +244,10 @@ fn merge_imported(scene: &mut Scene, imported: Scene) -> Vec<Id> {
 }
 
 /// mesh 类 op 注册（拓扑内核经 IR Geometry 进出）
-fn register_mesh_ops(reg: &mut OpRegistry) -> Result<(), OpError> {
+fn register_mesh_ops(
+    reg: &mut OpRegistry,
+    kernel: Arc<Mutex<dyn GeometryKernel>>,
+) -> Result<(), OpError> {
     reg.register(OpSpec {
         def: OpDef {
             id: "mesh.create".into(),
@@ -330,17 +375,20 @@ fn register_mesh_ops(reg: &mut OpRegistry) -> Result<(), OpError> {
                 param("c", "number", true, "顶点索引"),
             ],
         },
-        handler: Box::new(|scene: &mut Scene, args: &Value| {
-            let id = args["id"].as_str().unwrap().to_string();
-            let geo = get_mesh(scene, &id)?;
-            let mut mesh = Mesh::from_indexed(geo.positions, &geo.indices).map_err(mesh_err)?;
-            let a = archcore_ops::arg_u32(args, "a")?;
-            let b = archcore_ops::arg_u32(args, "b")?;
-            let c = archcore_ops::arg_u32(args, "c")?;
-            mesh.add_face(a, b, c).map_err(mesh_err)?;
-            let (pos, idx) = mesh.to_indexed();
-            put_mesh(scene, &id, pos, idx)?;
-            Ok((vec![id], Value::Null))
+        handler: Box::new({
+            let kernel = Arc::clone(&kernel);
+            move |scene: &mut Scene, args: &Value| {
+                let id = args["id"].as_str().unwrap().to_string();
+                let geo = get_mesh(scene, &id)?;
+                let mut mesh = Mesh::from_indexed(geo.positions, &geo.indices).map_err(mesh_err)?;
+                let a = archcore_ops::arg_u32(args, "a")?;
+                let b = archcore_ops::arg_u32(args, "b")?;
+                let c = archcore_ops::arg_u32(args, "c")?;
+                mesh.add_face(a, b, c).map_err(mesh_err)?;
+                let (pos, idx) = mesh.to_indexed();
+                put_mesh(&kernel, scene, &id, pos, idx)?;
+                Ok((vec![id], Value::Null))
+            }
         }),
     })?;
 
@@ -361,20 +409,23 @@ fn register_mesh_ops(reg: &mut OpRegistry) -> Result<(), OpError> {
                 param("v1", "number", true, "边端点"),
             ],
         },
-        handler: Box::new(|scene: &mut Scene, args: &Value| {
-            let id = args["id"].as_str().unwrap().to_string();
-            let geo = get_mesh(scene, &id)?;
-            let mut mesh = Mesh::from_indexed(geo.positions, &geo.indices).map_err(mesh_err)?;
-            let v0 = archcore_ops::arg_u32(args, "v0")?;
-            let v1 = archcore_ops::arg_u32(args, "v1")?;
-            let he = mesh.find_halfedge(v0, v1).ok_or_else(|| OpError::NotFound {
-                what: "edge".into(),
-                id: format!("({v0},{v1})"),
-            })?;
-            mesh.edge_flip(he).map_err(mesh_err)?;
-            let (pos, idx) = mesh.to_indexed();
-            put_mesh(scene, &id, pos, idx)?;
-            Ok((vec![id], Value::Null))
+        handler: Box::new({
+            let kernel = Arc::clone(&kernel);
+            move |scene: &mut Scene, args: &Value| {
+                let id = args["id"].as_str().unwrap().to_string();
+                let geo = get_mesh(scene, &id)?;
+                let mut mesh = Mesh::from_indexed(geo.positions, &geo.indices).map_err(mesh_err)?;
+                let v0 = archcore_ops::arg_u32(args, "v0")?;
+                let v1 = archcore_ops::arg_u32(args, "v1")?;
+                let he = mesh.find_halfedge(v0, v1).ok_or_else(|| OpError::NotFound {
+                    what: "edge".into(),
+                    id: format!("({v0},{v1})"),
+                })?;
+                mesh.edge_flip(he).map_err(mesh_err)?;
+                let (pos, idx) = mesh.to_indexed();
+                put_mesh(&kernel, scene, &id, pos, idx)?;
+                Ok((vec![id], Value::Null))
+            }
         }),
     })?;
 
@@ -396,27 +447,45 @@ fn register_mesh_ops(reg: &mut OpRegistry) -> Result<(), OpError> {
                 param("name", "string", false, "结果对象名"),
             ],
         },
-        handler: Box::new(|scene, args| {
-            let id_a = args["id_a"].as_str().unwrap().to_string();
-            let id_b = args["id_b"].as_str().unwrap().to_string();
-            let ga = get_mesh(scene, &id_a)?;
-            let gb = get_mesh(scene, &id_b)?;
-            let op_str = args["op"].as_str().unwrap();
-            let op = match op_str {
-                "union" => BoolOp::Union,
-                "difference" => BoolOp::Difference,
-                "intersection" => BoolOp::Intersection,
-                other => {
-                    return Err(OpError::BadRequest {
-                        param: "op".into(),
-                        reason: format!("未知布尔类型: {other}"),
-                    })
-                }
-            };
-            let ma = Mesh::from_indexed(ga.positions.clone(), &ga.indices).map_err(mesh_err)?;
-            let mb = Mesh::from_indexed(gb.positions.clone(), &gb.indices).map_err(mesh_err)?;
-            let out = ma.boolean(&mb, op).map_err(mesh_err)?;
-            let (pos, idx) = out.to_indexed();
+        handler: Box::new({
+            let kernel = Arc::clone(&kernel);
+            move |scene, args| {
+                let id_a = args["id_a"].as_str().unwrap().to_string();
+                let id_b = args["id_b"].as_str().unwrap().to_string();
+                let ga = get_mesh(scene, &id_a)?;
+                let gb = get_mesh(scene, &id_b)?;
+                let op_str = args["op"].as_str().unwrap();
+                let op = match op_str {
+                    "union" => KernelBoolOp::Union,
+                    "difference" => KernelBoolOp::Difference,
+                    "intersection" => KernelBoolOp::Intersection,
+                    other => {
+                        return Err(OpError::BadRequest {
+                            param: "op".into(),
+                            reason: format!("未知布尔类型: {other}"),
+                        })
+                    }
+                };
+                // 走内核端口：几何进内核算，算完再拷回场景（Scene 仍是真相源）
+                let (pos, idx) = {
+                    let mut k = kernel.lock().map_err(|e| OpError::Internal {
+                        reason: format!("内核锁不可用：{e}"),
+                    })?;
+                    let sa = k
+                        .create_from_mesh(ga.positions.clone(), ga.indices.clone())
+                        .map_err(kernel_err)?;
+                    let sb = k
+                        .create_from_mesh(gb.positions.clone(), gb.indices.clone())
+                        .map_err(kernel_err)?;
+                    let result = k.boolean(sa, sb, op, &CancelToken::new(), &mut |_| {});
+                    // 无论成败都释放临时实体，不留垃圾
+                    let out_id = result.map_err(kernel_err)?;
+                    let tess = k.tessellate(out_id, 1e-6).map_err(kernel_err)?;
+                    k.drop_solid(sa);
+                    k.drop_solid(sb);
+                    k.drop_solid(out_id);
+                    (tess.positions, tess.indices)
+                };
             let name = args
                 .get("name")
                 .and_then(|v| v.as_str())
@@ -441,7 +510,8 @@ fn register_mesh_ops(reg: &mut OpRegistry) -> Result<(), OpError> {
                 meta: BTreeMap::new(),
             });
             Ok((vec![id], Value::Null))
-        }),
+                }
+            }),
     })?;
 
     Ok(())
@@ -1284,7 +1354,10 @@ fn default_furniture_size(kind: &str) -> [f64; 3] {
 }
 
 /// 室内软装 op：程序化家具 + 门窗开洞（接布尔链）
-fn register_furnishing_ops(reg: &mut OpRegistry) -> Result<(), OpError> {
+fn register_furnishing_ops(
+    reg: &mut OpRegistry,
+    kernel: Arc<Mutex<dyn GeometryKernel>>,
+) -> Result<(), OpError> {
     reg.register(OpSpec {
         def: OpDef {
             id: "furniture.create".into(),
@@ -1395,25 +1468,27 @@ fn register_furnishing_ops(reg: &mut OpRegistry) -> Result<(), OpError> {
                 param("height", "number", false, "洞高（默认 2.1）"),
             ],
         },
-        handler: Box::new(|scene, args| {
-            let wall_id = args["wall"].as_str().unwrap().to_string();
-            let kind = args["kind"].as_str().unwrap();
-            if !matches!(kind, "door" | "window") {
-                return Err(OpError::BadRequest {
-                    param: "kind".into(),
-                    reason: format!("仅支持 door|window，实为 {kind}"),
-                });
-            }
-            let position: [f64; 3] = args
-                .get("position")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .ok_or_else(|| OpError::BadRequest {
-                    param: "position".into(),
-                    reason: "需 [x,y,z]".into(),
-                })?;
-            let width = dimf(args, "width", 0.9, 0.1, 50.0)?;
-            let height = dimf(args, "height", 2.1, 0.1, 50.0)?;
-            let geo = get_mesh(scene, &wall_id)?;
+        handler: Box::new({
+            let kernel = Arc::clone(&kernel);
+            move |scene, args| {
+                let wall_id = args["wall"].as_str().unwrap().to_string();
+                let kind = args["kind"].as_str().unwrap();
+                if !matches!(kind, "door" | "window") {
+                    return Err(OpError::BadRequest {
+                        param: "kind".into(),
+                        reason: format!("仅支持 door|window，实为 {kind}"),
+                    });
+                }
+                let position: [f64; 3] = args
+                    .get("position")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .ok_or_else(|| OpError::BadRequest {
+                        param: "position".into(),
+                        reason: "需 [x,y,z]".into(),
+                    })?;
+                let width = dimf(args, "width", 0.9, 0.1, 50.0)?;
+                let height = dimf(args, "height", 2.1, 0.1, 50.0)?;
+                let geo = get_mesh(scene, &wall_id)?;
             let mut lo = [f64::MAX; 3];
             let mut hi = [f64::MIN; 3];
             for p in &geo.positions {
@@ -1441,16 +1516,32 @@ fn register_furnishing_ops(reg: &mut OpRegistry) -> Result<(), OpError> {
             cmin[2] = position[2];
             cmax[2] = position[2] + height;
             let cutter = box_geometry(cmin, cmax);
-            let wall_mesh = archcore_mesh::Mesh::from_indexed(geo.positions, &geo.indices)
-                .map_err(mesh_err)?;
-            let cutter_mesh =
-                archcore_mesh::Mesh::from_indexed(cutter.positions, &cutter.indices)
-                    .map_err(mesh_err)?;
-            let result = wall_mesh
-                .boolean(&cutter_mesh, archcore_mesh::BoolOp::Difference)
-                .map_err(mesh_err)?;
-            let (pos, idx) = result.to_indexed();
-            put_mesh(scene, &wall_id, pos, idx)?;
+            // 走内核端口做差集
+            let (pos, idx) = {
+                let mut k = kernel.lock().map_err(|e| OpError::Internal {
+                    reason: format!("内核锁不可用：{e}"),
+                })?;
+                let sw = k
+                    .create_from_mesh(geo.positions.clone(), geo.indices.clone())
+                    .map_err(kernel_err)?;
+                let sc = k
+                    .create_from_mesh(cutter.positions, cutter.indices)
+                    .map_err(kernel_err)?;
+                let result = k.boolean(
+                    sw,
+                    sc,
+                    KernelBoolOp::Difference,
+                    &CancelToken::new(),
+                    &mut |_| {},
+                );
+                let out_id = result.map_err(kernel_err)?;
+                let tess = k.tessellate(out_id, 1e-6).map_err(kernel_err)?;
+                k.drop_solid(sw);
+                k.drop_solid(sc);
+                k.drop_solid(out_id);
+                (tess.positions, tess.indices)
+            };
+            put_mesh(&kernel, scene, &wall_id, pos, idx)?;
             // 开洞后平面重投影 UV（贴图连续性：与墙身同标尺，切洞处不断纹）
             if let Some(o) = scene.objects.iter_mut().find(|o| o.id == wall_id) {
                 if let ObjectKind::Mesh { geometry, .. } = &mut o.kind {
@@ -1472,7 +1563,8 @@ fn register_furnishing_ops(reg: &mut OpRegistry) -> Result<(), OpError> {
                 vec![wall_id],
                 serde_json::json!({"kind": kind, "width": width, "height": height}),
             ))
-        }),
+                }
+            }),
     })?;
     Ok(())
 }
@@ -2296,15 +2388,24 @@ impl Engine {
     }
 
     pub fn new() -> Self {
+        Self::with_kernel(archcore_kernel_mesh::shared())
+    }
+
+    /// 换内核后端。
+    ///
+    /// 上下文（app / 集成测试）用它注入 B-rep 后端；业务 op 只通过
+    /// [`GeometryKernel`] 端口碰几何，不感知具体实现。
+    pub fn with_kernel(kernel: Arc<Mutex<dyn GeometryKernel>>) -> Self {
         let mut registry = OpRegistry::new("0.1");
         register_builtins(&mut registry).expect("builtin 注册失败");
-        register_mesh_ops(&mut registry).expect("mesh op 注册失败");
+        register_mesh_ops(&mut registry, Arc::clone(&kernel)).expect("mesh op 注册失败");
         register_io_ops(&mut registry).expect("io op 注册失败");
         register_render_ops(&mut registry).expect("render op 注册失败");
         register_material_ops(&mut registry).expect("material op 注册失败");
         register_deliverable_ops(&mut registry).expect("deliverable op 注册失败");
         register_massing_ops(&mut registry).expect("massing op 注册失败");
-        register_furnishing_ops(&mut registry).expect("furnishing op 注册失败");
+        register_furnishing_ops(&mut registry, Arc::clone(&kernel))
+            .expect("furnishing op 注册失败");
         Self {
             scene: Scene {
                 schema_version: "0.1".into(),
@@ -2322,11 +2423,20 @@ impl Engine {
             verify: default_registry(),
             previews: BTreeMap::new(),
             preview_seq: 0,
+            kernel,
         }
     }
 
     pub fn capabilities(&self) -> CapabilityManifest {
         self.registry.capabilities()
+    }
+
+    /// 当前几何内核。
+    ///
+    /// 上层（GUI / 测试）用它查能力（能不能 STEP、精度多少），
+    /// 或在将来把 B-rep 后端换进来。
+    pub fn kernel(&self) -> Arc<Mutex<dyn GeometryKernel>> {
+        Arc::clone(&self.kernel)
     }
 
     /// 执行 + 验证闸 + 拦截自动回滚

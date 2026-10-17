@@ -1,0 +1,16 @@
+[package]
+name = "archcore-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+# 契约测试要跑真实后端；dev-dep 反向引用不构成循环
+archcore-kernel-mesh = { path = "../kernel-mesh" }
+archcore-kernel-brep = { path = "../kernel-brep" }
+
+[lints]
+workspace = true

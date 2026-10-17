@@ -73,7 +73,7 @@ checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
 
 [[package]]
 name = "archcore-app"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "archcore-io",
  "archcore-ir",
@@ -88,10 +88,12 @@ dependencies = [
 
 [[package]]
 name = "archcore-engine"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "archcore-io",
  "archcore-ir",
+ "archcore-kernel",
+ "archcore-kernel-mesh",
  "archcore-mesh",
  "archcore-ops",
  "archcore-render",
@@ -103,24 +105,50 @@ dependencies = [
 
 [[package]]
 name = "archcore-io"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "archcore-ir",
+ "crc32fast",
+ "memmap2",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "archcore-ir"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
 ]
 
 [[package]]
+name = "archcore-kernel"
+version = "0.3.0"
+dependencies = [
+ "archcore-kernel-brep",
+ "archcore-kernel-mesh",
+ "serde",
+]
+
+[[package]]
+name = "archcore-kernel-brep"
+version = "0.3.0"
+dependencies = [
+ "archcore-kernel",
+]
+
+[[package]]
+name = "archcore-kernel-mesh"
+version = "0.3.0"
+dependencies = [
+ "archcore-kernel",
+ "archcore-mesh",
+]
+
+[[package]]
 name = "archcore-mcp"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "archcore-engine",
  "archcore-ops",
@@ -130,14 +158,14 @@ dependencies = [
 
 [[package]]
 name = "archcore-mesh"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "manifold-rust",
 ]
 
 [[package]]
 name = "archcore-ops"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "archcore-ir",
  "serde",
@@ -146,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "archcore-render"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "archcore-ir",
  "archcore-ops",
@@ -160,7 +188,7 @@ dependencies = [
 
 [[package]]
 name = "archcore-txn"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "archcore-ir",
  "archcore-ops",
@@ -170,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "archcore-verify"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "archcore-ir",
  "archcore-ops",
@@ -2530,6 +2558,15 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "memmap2"
+version = "0.9.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "memoffset"
