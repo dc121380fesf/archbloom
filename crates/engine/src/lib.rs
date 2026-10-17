@@ -1152,9 +1152,12 @@ fn register_massing_ops(reg: &mut OpRegistry) -> Result<(), OpError> {
     Ok(())
 }
 
+/// 单位盒列表：（min, max）对，各轴落在 [0,1]³；size 缩放出实际尺寸
+type BoxList = Vec<([f64; 3], [f64; 3])>;
+
 /// 家具库（单位盒 [0,1]³ 组合，size 缩放出实际尺寸；size=包围盒目标）
-fn furniture_boxes(kind: &str) -> Result<Vec<([f64; 3], [f64; 3])>, OpError> {
-    let b: Vec<([f64; 3], [f64; 3])> = match kind {
+fn furniture_boxes(kind: &str) -> Result<BoxList, OpError> {
+    let b: BoxList = match kind {
         // 门：左右门框 + 门楣 + 门扇（各轴铺满 [0,1]，size=包围盒目标）
         "door" => vec![
             ([0.0, 0.0, 0.0], [0.07, 1.0, 1.0]),
@@ -2212,7 +2215,7 @@ impl Engine {
             let mut eng = Engine::new();
             let summary = eng.compose(&s)?;
             if let Some(p) = summary["deliverables"]["perspective"]["path"].as_str() {
-                views.push((format!("{nm_label}", nm_label = summary["scene"].as_str().unwrap_or("variant")), p.to_string()));
+                views.push((summary["scene"].as_str().unwrap_or("variant").to_string(), p.to_string()));
             }
             summaries.push(summary);
         }

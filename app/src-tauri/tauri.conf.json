@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Archbloom",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "identifier": "dev.archbloom.viewer",
   "build": { "frontendDist": "../dist" },
   "app": {
     "withGlobalTauri": true,
-    "windows": [{ "title": "Archcore 评审视口", "width": 1100, "height": 800 }],
+    "windows": [{ "title": "Archbloom 评审视口", "width": 1280, "height": 820 }],
     "security": { "csp": null }
   },
   "bundle": {

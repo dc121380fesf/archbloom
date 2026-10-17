@@ -73,10 +73,11 @@ checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
 
 [[package]]
 name = "archcore-app"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "archcore-ir",
  "archcore-render",
+ "base64 0.22.1",
  "serde",
  "serde_json",
  "tauri",
@@ -85,7 +86,7 @@ dependencies = [
 
 [[package]]
 name = "archcore-engine"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "archcore-io",
  "archcore-ir",
@@ -100,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "archcore-io"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "archcore-ir",
  "serde",
@@ -109,7 +110,7 @@ dependencies = [
 
 [[package]]
 name = "archcore-ir"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -117,7 +118,7 @@ dependencies = [
 
 [[package]]
 name = "archcore-mcp"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "archcore-engine",
  "archcore-ops",
@@ -127,14 +128,14 @@ dependencies = [
 
 [[package]]
 name = "archcore-mesh"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "manifold-rust",
 ]
 
 [[package]]
 name = "archcore-ops"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "archcore-ir",
  "serde",
@@ -143,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "archcore-render"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "archcore-ir",
  "archcore-ops",
@@ -157,7 +158,7 @@ dependencies = [
 
 [[package]]
 name = "archcore-txn"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "archcore-ir",
  "archcore-ops",
@@ -167,7 +168,7 @@ dependencies = [
 
 [[package]]
 name = "archcore-verify"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "archcore-ir",
  "archcore-ops",
