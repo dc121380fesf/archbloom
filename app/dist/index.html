@@ -68,6 +68,10 @@
     <div class="dropdown">
       <div class="item" data-cmd="new">新建 <kbd>Ctrl+N</kbd></div>
       <div class="item" data-cmd="open">打开… <kbd>Ctrl+O</kbd></div>
+      <div class="subparent">
+        <div class="item">最近打开</div>
+        <div class="submenu" id="recentmenu"></div>
+      </div>
       <div class="sep"></div>
       <div class="item" data-cmd="save">保存 <kbd>Ctrl+S</kbd></div>
       <div class="item" data-cmd="saveas">另存为… <kbd>Ctrl+Shift+S</kbd></div>
@@ -351,14 +355,48 @@ async function refreshView(){
 // ---------- 文件命令 ----------
 function say(msg){ resultEl.textContent = msg; }
 async function cmdNew(){
-  try { const r = await invoke('new_doc'); applyDoc(r); await refreshView(); say('已新建空白场景'); }
-  catch (e) { say(`新建失败: ${e}`); }
+  try {
+    const r = await invoke('new_doc');
+    if (r && r.cancelled) { say('已取消新建'); return; }
+    applyDoc(r); await refreshView(); say('已新建空白场景');
+  } catch (e) { say(`新建失败: ${e}`); }
+}
+
+// ---------- 最近打开 ----------
+async function renderRecent(){
+  const el = document.getElementById('recentmenu');
+  el.innerHTML = '<div class="group">最近文件</div>';
+  let list = [];
+  try { list = await invoke('recent_files'); } catch (e) { list = []; }
+  if (!list.length) {
+    const d = document.createElement('div');
+    d.className = 'item';
+    d.style.opacity = '.45';
+    d.textContent = '（暂无）';
+    el.appendChild(d);
+    return;
+  }
+  for (const f of list) {
+    const d = document.createElement('div');
+    d.className = 'item';
+    d.dataset.recent = f.path;
+    d.title = f.path;
+    d.textContent = f.name;
+    el.appendChild(d);
+  }
+}
+async function cmdOpenRecent(path){
+  try {
+    const r = await invoke('open_recent', { path });
+    if (r && r.cancelled) { say('已取消'); return; }
+    applyDoc(r); await refreshView(); await renderRecent(); say(`已打开 ${path}`);
+  } catch (e) { say(`打开失败: ${e}`); }
 }
 async function cmdOpen(){
   try {
     const r = await invoke('open_doc');
     if (r && r.cancelled) { say('已取消'); return; }
-    applyDoc(r); await refreshView(); say('已打开');
+    applyDoc(r); await refreshView(); await renderRecent(); say('已打开');
   } catch (e) { say(`打开失败: ${e}`); }
 }
 async function cmdSave(){
@@ -404,9 +442,10 @@ async function exportImage(preset){
 
 // ---------- 菜单派发 + 快捷键 ----------
 document.querySelector('.dropdown').addEventListener('click', (e) => {
-  const item = e.target.closest('[data-cmd],[data-export]');
+  const item = e.target.closest('[data-cmd],[data-export],[data-recent]');
   if (!item) return;
   filemenu.classList.remove('open');
+  if (item.dataset.recent) { cmdOpenRecent(item.dataset.recent); return; }
   if (item.dataset.cmd) {
     ({ new: cmdNew, open: cmdOpen, save: cmdSave, saveas: cmdSaveAs })[item.dataset.cmd]?.();
   } else if (item.dataset.export) {
@@ -416,6 +455,8 @@ document.querySelector('.dropdown').addEventListener('click', (e) => {
     else cmdExport(k);
   }
 });
+// 展开菜单时刷新最近列表
+document.getElementById('filebtn').addEventListener('click', () => { if (filemenu.classList.contains('open')) renderRecent(); });
 window.addEventListener('keydown', (e) => {
   if (!(e.ctrlKey || e.metaKey)) return;
   const k = e.key.toLowerCase();
@@ -452,6 +493,7 @@ document.getElementById('shot').onclick = async () => {
 // ---------- 启动 ----------
 (async () => {
   try { applyDoc(await invoke('doc_info')); } catch (e) { /* 忽略 */ }
+  await renderRecent();
   refreshView();
   render();
 })();

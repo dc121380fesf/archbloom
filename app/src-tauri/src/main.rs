@@ -14,6 +14,8 @@ use tauri_plugin_dialog::DialogExt;
 struct DocState {
     path: Option<PathBuf>,
     scene: Scene,
+    /// 自上次保存/载入后是否被改动（GUI 暂无编辑命令，为后续编辑面预留）
+    dirty: bool,
 }
 
 impl Default for DocState {
@@ -21,8 +23,28 @@ impl Default for DocState {
         Self {
             path: None,
             scene: empty_scene(),
+            dirty: false,
         }
     }
+}
+
+impl DocState {
+    /// 丢弃它会痛吗？——场景非空且（改动过 或 从未存过盘）
+    fn has_unsaved_work(&self) -> bool {
+        !self.scene.objects.is_empty() && (self.dirty || self.path.is_none())
+    }
+}
+
+/// 丢弃前拦一道：返回 true 表示用户确认丢弃
+async fn confirm_discard(app: &tauri::AppHandle, what: &str) -> bool {
+    app.dialog()
+        .message(format!(
+            "当前场景尚未保存，继续{what}会丢弃它。\n\n先保存再继续比较稳当。"
+        ))
+        .title("有未保存的场景")
+        .kind(tauri_plugin_dialog::MessageDialogKind::Warning)
+        .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancel)
+        .blocking_show()
 }
 
 fn empty_scene() -> Scene {
@@ -95,17 +117,38 @@ fn doc_payload(d: &DocState) -> Value {
         "objects": d.scene.objects.len(),
         "materials": d.scene.materials.len(),
         "assets": d.scene.assets.len(),
+        "dirty": d.dirty,
     })
+}
+
+/// 窗口标题跟随文档：`名称 — Archbloom`，未保存时带标记
+fn sync_title(window: &tauri::WebviewWindow, d: &DocState) {
+    // 未保存用星号标记（桌面软件惯例）
+    let mark = if d.dirty || d.path.is_none() { "*" } else { "" };
+    let _ = window.set_title(&format!("{}{} — Archbloom", d.scene.name, mark));
 }
 
 // ---------------------------------------------------------------- 文件命令
 
-/// 新建：清空为空白场景
+/// 新建：清空为空白场景（有未保存内容时先确认）
 #[command]
-fn new_doc(state: State<'_, Mutex<DocState>>) -> Result<Value, String> {
+async fn new_doc(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    state: State<'_, Mutex<DocState>>,
+) -> Result<Value, String> {
+    let need_confirm = {
+        let d = state.lock().map_err(|e| e.to_string())?;
+        d.has_unsaved_work()
+    };
+    if need_confirm && !confirm_discard(&app, "新建").await {
+        return Ok(json!({"cancelled": true}));
+    }
     let mut d = state.lock().map_err(|e| e.to_string())?;
     d.path = None;
     d.scene = empty_scene();
+    d.dirty = false;
+    sync_title(&window, &d);
     Ok(doc_payload(&d))
 }
 
@@ -113,8 +156,16 @@ fn new_doc(state: State<'_, Mutex<DocState>>) -> Result<Value, String> {
 #[command]
 async fn open_doc(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     state: State<'_, Mutex<DocState>>,
 ) -> Result<Value, String> {
+    let need_confirm = {
+        let d = state.lock().map_err(|e| e.to_string())?;
+        d.has_unsaved_work()
+    };
+    if need_confirm && !confirm_discard(&app, "打开其他文件").await {
+        return Ok(json!({"cancelled": true}));
+    }
     let picked = app
         .dialog()
         .file()
@@ -131,7 +182,10 @@ async fn open_doc(
     let scene = load_scene(&path.display().to_string())?;
     let mut d = state.lock().map_err(|e| e.to_string())?;
     d.scene = scene;
-    d.path = Some(path);
+    d.path = Some(path.clone());
+    d.dirty = false;
+    push_recent(&app, &path);
+    sync_title(&window, &d);
     Ok(doc_payload(&d))
 }
 
@@ -139,6 +193,7 @@ async fn open_doc(
 #[command]
 async fn save_doc(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     state: State<'_, Mutex<DocState>>,
 ) -> Result<Value, String> {
     let existing = {
@@ -150,15 +205,21 @@ async fn save_doc(
             let d = state.lock().map_err(|e| e.to_string())?;
             write_doc(&d.scene, &path)?
         };
+        {
+            let mut d = state.lock().map_err(|e| e.to_string())?;
+            d.dirty = false;
+            sync_title(&window, &d);
+        }
         return Ok(json!({"path": path.display().to_string(), "warnings": warnings}));
     }
-    save_doc_as(app, state).await
+    save_doc_as(app, window, state).await
 }
 
 /// 另存为：原生对话框选路径，按扩展名决定存成 `.al` 还是场景 JSON
 #[command]
 async fn save_doc_as(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     state: State<'_, Mutex<DocState>>,
 ) -> Result<Value, String> {
     let default_name = {
@@ -190,6 +251,9 @@ async fn save_doc_as(
     };
     let mut d = state.lock().map_err(|e| e.to_string())?;
     d.path = Some(path.clone());
+    d.dirty = false;
+    push_recent(&app, &path);
+    sync_title(&window, &d);
     Ok(json!({"path": path.display().to_string(), "warnings": warnings}))
 }
 
@@ -439,6 +503,102 @@ async fn pick_save_path(
     }
 }
 
+// ---------------------------------------------------------------- 设置与最近打开
+
+const RECENT_MAX: usize = 8;
+
+fn read_settings(app: &tauri::AppHandle) -> Value {
+    settings_file(app)
+        .and_then(|f| std::fs::read_to_string(f).ok())
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .unwrap_or_else(|| json!({}))
+}
+
+fn write_settings(app: &tauri::AppHandle, v: &Value) {
+    if let Some(f) = settings_file(app) {
+        if let Some(d) = f.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        if let Ok(text) = serde_json::to_string_pretty(v) {
+            let _ = std::fs::write(f, text);
+        }
+    }
+}
+
+fn push_recent(app: &tauri::AppHandle, path: &Path) {
+    let mut s = read_settings(app);
+    let p = path.display().to_string();
+    let mut list: Vec<String> = s
+        .get("recent")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    list.retain(|x| x != &p);
+    list.insert(0, p);
+    list.truncate(RECENT_MAX);
+    s["recent"] = json!(list);
+    write_settings(app, &s);
+}
+
+/// 最近打开的文件（已消失的不返回，免得菜单里堆死链）
+#[command]
+fn recent_files(app: tauri::AppHandle) -> Value {
+    let s = read_settings(&app);
+    let list: Vec<Value> = s
+        .get("recent")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .filter(|p| Path::new(p).is_file())
+                .map(|p| {
+                    json!({
+                        "path": p,
+                        "name": Path::new(p)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(p),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    json!(list)
+}
+
+/// 按路径打开（最近打开列表用）：与对话框版共享未保存确认
+#[command]
+async fn open_recent(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    state: State<'_, Mutex<DocState>>,
+    path: String,
+) -> Result<Value, String> {
+    let need_confirm = {
+        let d = state.lock().map_err(|e| e.to_string())?;
+        d.has_unsaved_work()
+    };
+    if need_confirm && !confirm_discard(&app, "打开其他文件").await {
+        return Ok(json!({"cancelled": true}));
+    }
+    let p = PathBuf::from(&path);
+    if !p.is_file() {
+        return Err(format!("文件已不存在：{path}"));
+    }
+    let scene = load_scene(&path)?;
+    let mut d = state.lock().map_err(|e| e.to_string())?;
+    d.scene = scene;
+    d.path = Some(p.clone());
+    d.dirty = false;
+    push_recent(&app, &p);
+    sync_title(&window, &d);
+    Ok(doc_payload(&d))
+}
+
 // ---------------------------------------------------------------- 外部依赖解析
 
 fn settings_file(app: &tauri::AppHandle) -> Option<PathBuf> {
@@ -446,22 +606,15 @@ fn settings_file(app: &tauri::AppHandle) -> Option<PathBuf> {
 }
 
 fn load_blender_from_settings(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let text = std::fs::read_to_string(settings_file(app)?).ok()?;
-    let v: Value = serde_json::from_str(&text).ok()?;
+    let v = read_settings(app);
     let pb = PathBuf::from(v.get("blender")?.as_str()?);
     if pb.is_file() { Some(pb) } else { None }
 }
 
 fn save_blender_to_settings(app: &tauri::AppHandle, path: &Path) {
-    if let Some(f) = settings_file(app) {
-        if let Some(d) = f.parent() {
-            let _ = std::fs::create_dir_all(d);
-        }
-        let body = json!({ "blender": path.display().to_string() });
-        if let Ok(text) = serde_json::to_string_pretty(&body) {
-            let _ = std::fs::write(f, text);
-        }
-    }
+    let mut s = read_settings(app);
+    s["blender"] = json!(path.display().to_string());
+    write_settings(app, &s);
 }
 
 /// 自动探测 Blender：环境变量 → PATH → 标准安装目录（取版本号最大者）
@@ -531,8 +684,12 @@ async fn resolve_blender(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 
 /// 当前文档信息（标题栏 / 状态栏用）
 #[command]
-fn doc_info(state: State<'_, Mutex<DocState>>) -> Result<Value, String> {
+fn doc_info(
+    window: tauri::WebviewWindow,
+    state: State<'_, Mutex<DocState>>,
+) -> Result<Value, String> {
     let d = state.lock().map_err(|e| e.to_string())?;
+    sync_title(&window, &d);
     Ok(doc_payload(&d))
 }
 
@@ -540,9 +697,37 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Mutex::new(DocState::default()))
+        .on_window_event(|window, event| {
+            // 关窗前拦一道：有未保存内容就弹确认（确认后才真关）
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let need = window
+                    .state::<Mutex<DocState>>()
+                    .lock()
+                    .map(|d| d.has_unsaved_work())
+                    .unwrap_or(false);
+                if need {
+                    api.prevent_close();
+                    let w = window.clone();
+                    window
+                        .app_handle()
+                        .dialog()
+                        .message("当前场景尚未保存，关闭会丢弃它。")
+                        .title("有未保存的场景")
+                        .kind(tauri_plugin_dialog::MessageDialogKind::Warning)
+                        .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancel)
+                        .show(move |ok| {
+                            if ok {
+                                let _ = w.destroy();
+                            }
+                        });
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             new_doc,
             open_doc,
+            open_recent,
+            recent_files,
             save_doc,
             save_doc_as,
             export_scene,
