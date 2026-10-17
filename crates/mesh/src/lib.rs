@@ -376,7 +376,7 @@ impl Mesh {
         for p in positions {
             m.add_vertex(p);
         }
-        for tri in indices.chunks_exact(3) {
+        for tri in indices.as_chunks::<3>().0 {
             m.add_face(tri[0], tri[1], tri[2])?;
         }
         Ok(m)
