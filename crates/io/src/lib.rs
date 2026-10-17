@@ -7,7 +7,9 @@ use archcore_ir::{
 use serde_json::{json, Value};
 use std::path::Path;
 
+pub mod archive;
 pub mod ifc;
+pub use archive::{Archive, ArchiveFile, PackReport};
 pub use ifc::{export_ifc, import_ifc};
 
 #[derive(Debug)]
@@ -283,6 +285,65 @@ pub fn export_gltf(scene: &Scene) -> Vec<u8> {
 }
 
 // ---------- glTF 导入（往返可测的子集） ----------
+
+/// IR 场景 → GLB（binary glTF 2.0）：把 `.gltf` 内嵌的 base64 buffer 抽成 BIN 块。
+///
+/// GLB 布局：12 字节头（`glTF` + version 2 + total length）→ JSON 块 → 可选 BIN 块，
+/// 两个块都是「4 字节长度 + 4 字节类型 + 4 字节对齐的载荷」。
+/// 导出后可用 [`import_gltf`] 直接读回（它本就把 GLB 作为一等输入）。
+pub fn export_glb(scene: &Scene) -> Result<Vec<u8>, IoError> {
+    let json_bytes = export_gltf(scene);
+    let mut root: Value = serde_json::from_slice(&json_bytes)
+        .map_err(|e| IoError::Format(format!("glTF JSON 解析失败：{e}")))?;
+
+    let uri = root["buffers"]
+        .get(0)
+        .and_then(|b| b["uri"].as_str())
+        .map(|s| s.to_string());
+    let bin = match uri {
+        Some(u) => {
+            let raw = u
+                .split("base64,")
+                .nth(1)
+                .ok_or_else(|| IoError::Format("glTF buffer 不是 base64 data URI".into()))?;
+            let bytes = b64_decode(raw)?;
+            if let Some(b0) = root["buffers"].get_mut(0).and_then(|b| b.as_object_mut()) {
+                b0.remove("uri");
+            }
+            bytes
+        }
+        None => Vec::new(),
+    };
+
+    let mut json_chunk = serde_json::to_vec(&root)
+        .map_err(|e| IoError::Format(format!("glTF 重新序列化失败：{e}")))?;
+    while json_chunk.len() % 4 != 0 {
+        json_chunk.push(b' ');
+    }
+    let mut bin_chunk = bin;
+    while bin_chunk.len() % 4 != 0 {
+        bin_chunk.push(0);
+    }
+    let has_bin = !bin_chunk.is_empty();
+    let total = 12
+        + 8
+        + json_chunk.len()
+        + if has_bin { 8 + bin_chunk.len() } else { 0 };
+
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(b"glTF");
+    out.extend_from_slice(&2u32.to_le_bytes());
+    out.extend_from_slice(&(total as u32).to_le_bytes());
+    out.extend_from_slice(&(json_chunk.len() as u32).to_le_bytes());
+    out.extend_from_slice(&0x4E4F_534Au32.to_le_bytes()); // "JSON"
+    out.extend_from_slice(&json_chunk);
+    if has_bin {
+        out.extend_from_slice(&(bin_chunk.len() as u32).to_le_bytes());
+        out.extend_from_slice(&0x004E_4942u32.to_le_bytes()); // "BIN\0"
+        out.extend_from_slice(&bin_chunk);
+    }
+    Ok(out)
+}
 
 /// glTF 导入：支持纯 JSON（内嵌 data URI buffer）与 GLB 容器（JSON+BIN 块）
 pub fn import_gltf(data: &[u8]) -> Result<Scene, IoError> {
@@ -656,6 +717,33 @@ pub fn import_fbx(blender: &Path, path: &Path) -> Result<Scene, IoError> {
 mod tests {
     use super::*;
     use archcore_ir::{ObjectKind, Transform};
+
+    #[test]
+    fn glb_导出可被自身导入() {
+        let scene = sample_scene();
+        let glb = export_glb(&scene).unwrap();
+        // 头部：magic + version=2 + 总长与实长一致
+        assert_eq!(&glb[0..4], b"glTF");
+        assert_eq!(u32::from_le_bytes([glb[4], glb[5], glb[6], glb[7]]), 2);
+        let total = u32::from_le_bytes([glb[8], glb[9], glb[10], glb[11]]) as usize;
+        assert_eq!(total, glb.len());
+        // 两个块头都 4 字节对齐
+        assert_eq!(glb.len() % 4, 0);
+
+        // 往返：自身导入器能读回，三角面数一致
+        let back = import_gltf(&glb).unwrap();
+        let tris = |s: &Scene| -> usize {
+            s.objects
+                .iter()
+                .map(|o| match &o.kind {
+                    ObjectKind::Mesh { geometry, .. } => geometry.indices.len() / 3,
+                    _ => 0,
+                })
+                .sum()
+        };
+        assert!(tris(&scene) > 0, "样本场景应当有三角面");
+        assert_eq!(tris(&back), tris(&scene));
+    }
 
     fn sample_scene() -> Scene {
         Scene {
