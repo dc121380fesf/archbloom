@@ -149,7 +149,7 @@ pub fn merge_coplanar(solid: &Solid) -> Result<(Solid, MergeStats), KernelError>
             .surface
             .normal_at(solid.verts[fi.verts[0] as usize])
             .unwrap_or([0.0, 0.0, 1.0]);
-        let Some(new_face) = try_splice(solid, &fi, &fj, nrm) else {
+        let Some(new_face) = try_splice(solid, &fi, &fj, nrm, true) else {
             continue;
         };
         let area = poly_area(solid, &new_face.verts, &new_face.holes, nrm);
@@ -250,12 +250,23 @@ pub fn merge_coplanar(solid: &Solid) -> Result<(Solid, MergeStats), KernelError>
 ///
 /// 拼接后如果环里出现重复顶点，说明两段路径**首尾相遇**。这有两种可能：
 ///
-/// * **形成洞**：分出的两个环一个完全包含另一个（开孔板顶面的最终形态）；
+/// * **形成洞**：分出的两个环一个完全包含另一个；
 /// * **自交**：两个环交叉（拼错了，必须拒掉）。
 ///
-/// 早期版本一律当自交拒掉，所以顶面只能拼成留缝的 C 形大环（534 面而非 ~70）。
-/// 现在用「包含性测试」区分：小环所有顶点都在大环内部 → 当作洞接受。
-fn try_splice(solid: &Solid, a: &Face, b: &Face, normal: Vector3) -> Option<Face> {
+/// # 为什么要分两轮（allow_holes）
+///
+/// 如果一开始就允许产生洞，相邻两块刚拼上就围出一个小圈，结果是
+/// **47 个 6 点的碎片洞**而不是一个完整圆孔——顶面孔口写不成圆边，STEP 壳不闭合。
+///
+/// 所以第一轮 `allow_holes = false`：让面先长成大片；
+/// 第二轮才允许闭合。这样洞会在拼接接近尾声时一次性形成。
+fn try_splice(
+    solid: &Solid,
+    a: &Face,
+    b: &Face,
+    normal: Vector3,
+    allow_holes: bool,
+) -> Option<Face> {
     // 找共享边：a 有向边 (x→y)，b 必须是 (y→x)
     let ra = &a.verts;
     let rb = &b.verts;
@@ -313,6 +324,11 @@ fn try_splice(solid: &Solid, a: &Face, b: &Face, normal: Vector3) -> Option<Face
             });
         };
 
+        // 第一轮不允许产生洞：提前闭合会在孔口周围留下大量碎片洞
+        if !allow_holes {
+            return None;
+        }
+
         // 分成两环
         let ring_a: Vec<u32> = ring[p1..p2].to_vec();
         let mut ring_b: Vec<u32> = ring[p2..].to_vec();
@@ -333,6 +349,17 @@ fn try_splice(solid: &Solid, a: &Face, b: &Face, normal: Vector3) -> Option<Face
         let aa = poly_area2(&pa2).abs();
         let ab = poly_area2(&pb2).abs();
         if aa <= 0.0 || ab <= 0.0 {
+            return None;
+        }
+
+        // **洞太小的就拒掉**：那是提前闭合留下的碎片，不是真孔。
+        //
+        // 实测：不卡这一条时，顶面会形成 47 个 6 点的碎片洞（半径差 55%），
+        // 孔口写不成圆边，STEP 壳不闭合。真实的孔（Φ10 在 20×20 板上）
+        // 面积占比 ~20%，碎片则远小于 1%。
+        let small = aa.min(ab);
+        let big = aa.max(ab);
+        if small / big < 0.02 {
             return None;
         }
 
