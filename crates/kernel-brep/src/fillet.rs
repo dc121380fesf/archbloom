@@ -269,9 +269,14 @@ pub fn fillet_solid(
         }};
     }
 
-    // 3a) 原面：顶点被圆角边连着的，换成轨线端点
-    // (面, 原顶点) → 该面上的轨线端点
-    let mut cut: HashMap<(usize, u32), Point3> = HashMap::new();
+    // ── 索引共享（关键重构）──
+    //
+    // 端点的坐标只算一次、索引只分配一次。
+    // 之后原面、圆角面、角部面**全部引用同一批索引**，不靠坐标合并。
+    //
+    // 之前是每个面各自 put!(坐标)，靠 weld 按量化坐标合并——
+    // 浮点一抖就合不上，实测 234 条孤边 / 333 条总边。
+    let mut corner_idx: HashMap<(usize, u32), u32> = HashMap::new();
     for (i, e) in table.iter().enumerate() {
         if !selected[i] {
             continue;
@@ -279,22 +284,20 @@ pub fn fillet_solid(
         let Some(rl) = rails.get(&(e.a, e.b)) else {
             continue;
         };
-        if std::env::var("ARCHCORE_DEBUG_FILLET").is_ok() && (e.a == 0 || e.b == 0) {
-            eprintln!("[fillet] 边({},{}) f1={} f2={} | a1={:?} b1={:?} a2={:?} b2={:?}",
-                e.a, e.b, e.f1, e.f2, rl.f1_start, rl.f1_end, rl.f2_start, rl.f2_end);
-        }
-        cut.insert((e.f1, e.a), rl.f1_start);
-        cut.insert((e.f1, e.b), rl.f1_end);
-        cut.insert((e.f2, e.a), rl.f2_start);
-        cut.insert((e.f2, e.b), rl.f2_end);
+        corner_idx.insert((e.f1, e.a), put!(rl.f1_start));
+        corner_idx.insert((e.f1, e.b), put!(rl.f1_end));
+        corner_idx.insert((e.f2, e.a), put!(rl.f2_start));
+        corner_idx.insert((e.f2, e.b), put!(rl.f2_end));
     }
+
+    // 3a) 原面：边界顶点直接用 corner_idx 的索引
     for (fi, f) in solid.faces.iter().enumerate() {
         let n = f.verts.len();
         let mut ring: Vec<u32> = Vec::with_capacity(n);
         for i in 0..n {
             let cur = f.verts[i];
-            match cut.get(&(fi, cur)) {
-                Some(p) => ring.push(put!(*p)),
+            match corner_idx.get(&(fi, cur)) {
+                Some(&idx) => ring.push(idx),
                 None => ring.push(put!(solid.verts[cur as usize])),
             }
         }
@@ -339,8 +342,9 @@ pub fn fillet_solid(
         } else {
             -1.0
         };
-        let mut prev_a = put!(rl.f1_start);
-        let mut prev_b = put!(rl.f1_end);
+        // 圆角面：两端用**共享索引**（corner_idx），中间点新建
+        let mut prev_a = corner_idx[&(e.f1, e.a)];
+        let mut prev_b = corner_idx[&(e.f1, e.b)];
         for s in 1..=seg {
             let t = s as f64 / seg as f64;
             let ang_a = total_a * t * sign_a;
@@ -350,12 +354,12 @@ pub fn fillet_solid(
             let cur_a = add(rl.ca, scale(dir_a, r));
             let cur_b = add(rl.cb, scale(dir_b, r));
             let va = if s == seg {
-                put!(rl.f2_start)
+                corner_idx[&(e.f2, e.a)]
             } else {
                 put!(cur_a)
             };
             let vb = if s == seg {
-                put!(rl.f2_end)
+                corner_idx[&(e.f2, e.b)]
             } else {
                 put!(cur_b)
             };
@@ -399,7 +403,7 @@ pub fn fillet_solid(
     // 以球心为顶点做扇形三角（球面三角的离散）。
     for (&v, (c, faces_at_v)) in &spheres {
         let pv = solid.verts[v as usize];
-        let mut ring_pts: Vec<Point3> = Vec::new();
+        let mut ring_pts: Vec<(Point3, u32)> = Vec::new();
         for (i, e) in table.iter().enumerate() {
             if !selected[i] || (e.a != v && e.b != v) {
                 continue;
@@ -412,18 +416,21 @@ pub fn fillet_solid(
             } else {
                 (rl.f1_end, rl.f2_end)
             };
-            ring_pts.push(p1);
-            ring_pts.push(p2);
+            // 索引也一并拿——角部面必须引用同一批索引，不再靠坐标合并
+            let i1 = corner_idx.get(&(e.f1, v)).copied();
+            let i2 = corner_idx.get(&(e.f2, v)).copied();
+            if let Some(i1) = i1 {
+                ring_pts.push((p1, i1));
+            }
+            if let Some(i2) = i2 {
+                ring_pts.push((p2, i2));
+            }
         }
-        // 去重
-        //
-        // 阈值不能用 1e-18（距离 1e-9）——轨线端点是两组不同路径算出来的，
-        // 浮点差异远大于 1e-9，相同位置被判成不同点，角部面就会有一堆重复顶点，
-        // 拓扑直接断掉（实测 246 条孤边 / 345 条总边）。
-        let mut uniq: Vec<Point3> = Vec::new();
-        for p in ring_pts {
-            if !uniq.iter().any(|q| dist2(*q, p) < 1e-12) {
-                uniq.push(p);
+        // 去重（按索引）
+        let mut uniq: Vec<(Point3, u32)> = Vec::new();
+        for (p, i) in ring_pts {
+            if !uniq.iter().any(|(_, j)| *j == i) {
+                uniq.push((p, i));
             }
         }
         if uniq.len() < 3 {
@@ -441,11 +448,11 @@ pub fn fillet_solid(
         let Some((u, w)) = crate::geom::orthonormal_basis(in_n) else {
             continue;
         };
-        let mut keyed: Vec<(f64, Point3)> = uniq
+        let mut keyed: Vec<(f64, u32)> = uniq
             .into_iter()
-            .map(|p| {
+            .map(|(p, i)| {
                 let d = sub(p, pv);
-                (dot(d, w).atan2(dot(d, u)), p)
+                (dot(d, w).atan2(dot(d, u)), i)
             })
             .collect();
         keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -455,15 +462,7 @@ pub fn fillet_solid(
         // 球面片的正确做法：边界就是轨道端点在球面上的那段弧，
         // 面本身是球面的一部分。这里先用“球面上端点组成的多边形”近似（一个平面面），
         // 弓高误差在 R 量级，比穿进实体好得多。
-        let ring: Vec<u32> = keyed
-            .iter()
-            .map(|(_, p)| {
-                let q = normalize(sub(*p, *c))
-                    .map(|d| add(*c, scale(d, r)))
-                    .unwrap_or(*p);
-                put!(q)
-            })
-            .collect();
+        let ring: Vec<u32> = keyed.iter().map(|(_, i)| *i).collect();
         let mut ring = dedup(ring);
         if ring.len() >= 3 {
             // 朝向必须「远离球心」
@@ -574,6 +573,7 @@ fn rotate(v: Vector3, axis: Vector3, ang: f64) -> Vector3 {
     .unwrap_or(v)
 }
 
+#[allow(dead_code)]
 fn dist2(a: Point3, b: Point3) -> f64 {
     let d = sub(a, b);
     dot(d, d)
