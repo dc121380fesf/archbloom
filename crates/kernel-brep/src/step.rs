@@ -96,8 +96,7 @@ pub fn to_step(solid: &Solid, name: &str) -> String {
 /// 在此之前，这个入口直接返回全平面结果——**宁可输出已知正确的多面体，
 /// 也不输出一份“看起来有曲面但几何错”的文件**。
 pub fn to_step_curved(solid: &Solid, name: &str) -> String {
-    let _ = true; // 保留分支结构，待 S2 完成后打开
-    to_step_impl(solid, name, false)
+    to_step_impl(solid, name, true)
 }
 
 fn to_step_impl(solid: &Solid, name: &str, use_cylinders: bool) -> String {
@@ -164,6 +163,12 @@ fn to_step_impl(solid: &Solid, name: &str, use_cylinders: bool) -> String {
     // **成对交付**：曲面配圆弧边。做不到就整组退回逐面平面折线，
     // 绝不在曲面上用折线（那会让文件语义自相矛盾）。
     let mut consumed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // 圆边缓存：圆心+半径 → EDGE_CURVE 引用。
+    //
+    // 顶/底面必须**复用**侧面已经写过的同一条圆边，否则壳在圆环处断成两半。
+    // OCC 的输出就是这么做的（顶面、底面各用一条 ORIENTED_EDGE 引同一批圆边）。
+    let mut circle_edges: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     if use_cylinders {
         let mut groups: std::collections::HashMap<String, (Surface, Vec<usize>)> =
             std::collections::HashMap::new();
@@ -193,7 +198,9 @@ fn to_step_impl(solid: &Solid, name: &str, use_cylinders: bool) -> String {
             if idxs.len() < 4 {
                 continue;
             }
-            if let Some(face_ref) = emit_cylinder_side(&mut w, solid, idxs, surf, &vpoint) {
+            if let Some(face_ref) =
+                emit_cylinder_side(&mut w, solid, idxs, surf, &vpoint, &mut circle_edges)
+            {
                 face_refs.push(face_ref);
                 for &i in idxs {
                     consumed.insert(i);
@@ -205,8 +212,7 @@ fn to_step_impl(solid: &Solid, name: &str, use_cylinders: bool) -> String {
     for (face_idx, f) in solid.faces.iter().enumerate() {
         if consumed.contains(&face_idx) {
             continue;
-        }
-        let ring = &f.verts;
+        }        let ring = &f.verts;
         if ring.len() < 3 {
             continue;
         }
@@ -234,6 +240,34 @@ fn to_step_impl(solid: &Solid, name: &str, use_cylinders: bool) -> String {
             .normal_at(centroid)
             .or_else(|| normalize(cross(sub(verts[1], verts[0]), sub(verts[2], verts[0]))))
             .unwrap_or([0.0, 0.0, 1.0]);
+
+        // ── 圆柱端面：如果环上顶点共圆，复用侧面写的整圆边 ──
+        //
+        // 这是壳能闭合的关键。顶面如果还用 16 段折线，它就和侧面的整圆边对不上，
+        // OCC 会把它们当两个不相关的壳。
+        if use_cylinders {
+            let det = detect_circle(solid, ring, normal);
+            if let Some((c_center, c_radius)) = det {
+                let key = circle_key(c_center, normal, c_radius);
+                if let Some(edge) = circle_edges.get(&key) {
+                    let plane_origin =
+                        w.add(&format!("CARTESIAN_POINT('',{})", pt(verts[0])));
+                    let p_axis = w.add(&format!("DIRECTION('',{})", pt(normal)));
+                    let p_ref = w.add(&format!("DIRECTION('',{})", pt(pick_reference(normal))));
+                    let p_pl = w.add(&format!(
+                        "AXIS2_PLACEMENT_3D('',{plane_origin},{p_axis},{p_ref})"
+                    ));
+                    let p_surf = w.add(&format!("PLANE('',{p_pl})"));
+                    let oe = w.add(&format!("ORIENTED_EDGE('',*,*,{edge},.T.)"));
+                    let lid = w.add(&format!("EDGE_LOOP('',({oe}))"));
+                    let bnd = w.add(&format!("FACE_BOUND('',{lid},.T.)"));
+                    face_refs.push(w.add(&format!(
+                        "ADVANCED_FACE('',({bnd}),{p_surf},.T.)"
+                    )));
+                    continue;
+                }
+            }
+        }
 
         // 平面：AXIS2_PLACEMENT_3D(原点, 法线, 参考方向)
         let ref_dir = pick_reference(normal);
@@ -323,6 +357,7 @@ fn emit_cylinder_side(
     faces: &[usize],
     surface: &Surface,
     vpoint: &[String],
+    circles: &mut std::collections::HashMap<String, String>,
 ) -> Option<String> {
     let Surface::Cylinder {
         origin,
@@ -398,10 +433,15 @@ fn emit_cylinder_side(
     }
 
     // ── 曲面：AXIS2_PLACEMENT_3D 原点在底圆心，Z 轴为轴向，X 轴为角度零点 ──
-    let p0 = solid.verts[bot[0].1 as usize];
-    let h0 = dot(sub(p0, origin), axis);
-    let base_p = sub(p0, [axis[0] * h0, axis[1] * h0, axis[2] * h0]);
-    let co = w.add(&format!("CARTESIAN_POINT('',{})", pt(base_p)));
+    let base_center_for_surf = {
+        let h = dot(sub(solid.verts[bot[0].1 as usize], origin), axis);
+        [
+            origin[0] + axis[0] * h,
+            origin[1] + axis[1] * h,
+            origin[2] + axis[2] * h,
+        ]
+    };
+    let co = w.add(&format!("CARTESIAN_POINT('',{})", pt(base_center_for_surf)));
     let ad = w.add(&format!("DIRECTION('',{})", pt(axis)));
     let rd = w.add(&format!("DIRECTION('',{})", pt(u)));
     let pl = w.add(&format!("AXIS2_PLACEMENT_3D('',{co},{ad},{rd})"));
@@ -409,140 +449,157 @@ fn emit_cylinder_side(
 
     let mut oriented: Vec<String> = Vec::new();
 
-    // 底/顶圆心（轴线上同高度）
-    let base_center = sub(
-        solid.verts[bot[0].1 as usize],
-        {
-            let h = dot(sub(solid.verts[bot[0].1 as usize], origin), axis);
-            [axis[0] * h, axis[1] * h, axis[2] * h]
-        },
-    );
-    let top_center = sub(
-        solid.verts[top[0].1 as usize],
-        {
-            let h = dot(sub(solid.verts[top[0].1 as usize], origin), axis);
-            [axis[0] * h, axis[1] * h, axis[2] * h]
-        },
-    );
+    // 底/顶圆心 = 轴线上的点（origin + axis*h），**不是 p 减去轴向分量**。
+    //
+    // 早先写成 sub(p, axis*h)，那会把圆周点的径向分量留在“圆心”里——
 
-    // 底圆：**两段半圆**（OCC 的标准写法），不用 32 段小弧。
+    // 底/顶圆心 = 轴线上的点（origin + axis*h），**不是 p 减去轴向分量**。
     //
-    // 小弧的问题：每条弧都有自己的 CIRCLE 实体，FreeCAD 把它们当互不相干的圆，
-    // 结果一条环被拆成两个面。半圆只有一个圆心方向，拓扑自然闭合。
-    //
-    // 前提：首末顶点必须正好在对面（180°）。16 段的圆柱满足（第 8 段）。
-    let half_angle_fn = |a: (f64, u32), b: (f64, u32)| -> f64 {
-        let mut d = b.0 - a.0;
-        while d < 0.0 {
-            d += tau;
-        }
-        d
+    // 早先写成 sub(p, axis*h)，那会把圆周点的径向分量留在“圆心”里——
+    // 算出的圆心是 (0.005,0,0) 而不是 (0,0,0.02)，和端面检测出的圆心永远对不上，
+    // 顶/底面因此退不回折线，壳在圆环处断成两半。
+    let base_center = {
+        let h = dot(sub(solid.verts[bot[0].1 as usize], origin), axis);
+        [
+            origin[0] + axis[0] * h,
+            origin[1] + axis[1] * h,
+            origin[2] + axis[2] * h,
+        ]
     };
-    let mut half_idx = None;
-    for i in 1..n {
-        let d = half_angle_fn(bot[0], bot[i]);
-        if (d - std::f64::consts::PI).abs() < 0.2 {
-            half_idx = Some(i);
-            break;
-        }
-    }
-    let Some(h) = half_idx else {
-        // 找不到对面顶点（段数奇数）：退回逐面折线
-        return None;
+    let top_center = {
+        let h = dot(sub(solid.verts[top[0].1 as usize], origin), axis);
+        [
+            origin[0] + axis[0] * h,
+            origin[1] + axis[1] * h,
+            origin[2] + axis[2] * h,
+        ]
     };
 
-    // 底半圆 1: bot[0] → bot[h]
-    let a0 = bot[0];
-    let ah = bot[h];
-    let arc1 = arc_entity(w, solid.verts[a0.1 as usize], base_center, axis, radius, true);
-    let ec1 = w.add(&format!(
-        "EDGE_CURVE('',{},{},{arc1},.T.)",
-        vpoint[a0.1 as usize], vpoint[ah.1 as usize]
-    ));
-    oriented.push(w.add(&format!("ORIENTED_EDGE('',*,*,{ec1},.T.)")));
+    // ── 边的结构与 OCC 一致 ──
+    //
+    // 关键发现（对照 FreeCAD 导出的圆柱 STEP）：
+    // **整圆就是一条闭合的 EDGE_CURVE，起点和终点是同一个 VERTEX_POINT**，
+    // 不需要 TRIMMED_CURVE、不需要拆半圆。
+    //
+    //   侧面环：顶圆(.F.) → 母线(.F.) → 底圆(.T.) → 母线(.T.)
+    //
+    // 一共 4 条 ORIENTED_EDGE，OCC 也是这样。之前我写成 34 条（32 弧 + 2 seam），
+    // 结构上就不对。
+    let b0 = bot[0];
+    let t0 = top[0];
+    let pb0 = solid.verts[b0.1 as usize];
+    let pt0 = solid.verts[t0.1 as usize];
 
-    // 底半圆 2: bot[h] → bot[0]（从 a0 角度 +π 继续到 2π）
-    let arc2 = arc_entity(w, solid.verts[ah.1 as usize], base_center, axis, radius, true);
-    let ec2 = w.add(&format!(
-        "EDGE_CURVE('',{},{},{arc2},.T.)",
-        vpoint[ah.1 as usize], vpoint[a0.1 as usize]
-    ));
-    oriented.push(w.add(&format!("ORIENTED_EDGE('',*,*,{ec2},.T.)")));
-
-    // 母线：上去
+    // 顶圆（闭合边，顶点 = pt0）
+    let top_circle = circle_edge(w, pt0, top_center, axis, radius, &vpoint[t0.1 as usize]);
+    // 底圆（闭合边，顶点 = pb0）
+    let bot_circle = circle_edge(w, pb0, base_center, axis, radius, &vpoint[b0.1 as usize]);
+    // 缓存给顶/底面复用
+    circles.insert(circle_key(top_center, axis, radius), top_circle.clone());
+    circles.insert(circle_key(base_center, axis, radius), bot_circle.clone());
+    // 母线：底 → 顶
     let seam = {
-        let a = bot[0].1;
-        let b = top[0].1;
-        let va = solid.verts[a as usize];
-        let vb = solid.verts[b as usize];
-        let dir = normalize(sub(vb, va))?;
-        let po = w.add(&format!("CARTESIAN_POINT('',{})", pt(va)));
+        let dir = normalize(sub(pt0, pb0))?;
+        let po = w.add(&format!("CARTESIAN_POINT('',{})", pt(pb0)));
         let dd = w.add(&format!("DIRECTION('',{})", pt(dir)));
         let vec = w.add(&format!("VECTOR('',{dd},1.)"));
         let line = w.add(&format!("LINE('',{po},{vec})"));
         w.add(&format!(
             "EDGE_CURVE('',{},{},{line},.T.)",
-            vpoint[a as usize], vpoint[b as usize]
+            vpoint[b0.1 as usize], vpoint[t0.1 as usize]
         ))
     };
-    oriented.push(w.add(&format!("ORIENTED_EDGE('',*,*,{seam},.T.)")));
 
-    // 顶圆：同样两段半圆，方向相反
-    let b0 = top[0];
-    let bh = top[h];
-    let t_arc1 = arc_entity(w, solid.verts[b0.1 as usize], top_center, axis, radius, true);
-    let tec1 = w.add(&format!(
-        "EDGE_CURVE('',{},{},{t_arc1},.T.)",
-        vpoint[b0.1 as usize], vpoint[bh.1 as usize]
-    ));
-    let t_arc2 = arc_entity(w, solid.verts[bh.1 as usize], top_center, axis, radius, true);
-    let tec2 = w.add(&format!(
-        "EDGE_CURVE('',{},{},{t_arc2},.T.)",
-        vpoint[bh.1 as usize], vpoint[b0.1 as usize]
-    ));
-    // 环里反向走：b0 ← bh ← b0
-    oriented.push(w.add(&format!("ORIENTED_EDGE('',*,*,{tec2},.F.)")));
-    oriented.push(w.add(&format!("ORIENTED_EDGE('',*,*,{tec1},.F.)")));
-
-    // 母线：下来（同一条边，反向）
+    oriented.push(w.add(&format!("ORIENTED_EDGE('',*,*,{top_circle},.F.)")));
     oriented.push(w.add(&format!("ORIENTED_EDGE('',*,*,{seam},.F.)")));
+    oriented.push(w.add(&format!("ORIENTED_EDGE('',*,*,{bot_circle},.T.)")));
+    oriented.push(w.add(&format!("ORIENTED_EDGE('',*,*,{seam},.T.)")));
 
     let loop_id = w.add(&format!("EDGE_LOOP('',({}))", P21::ref_list(&oriented)));
     let bound = w.add(&format!("FACE_OUTER_BOUND('',{loop_id},.T.)"));
     Some(w.add(&format!("ADVANCED_FACE('',({bound}),{surf},.T.)")))
 }
 
-/// 写一段圆弧：`CIRCLE` + `TRIMMED_CURVE`。
+
+
+/// 圆边缓存的键：圆心 + 轴 + 半径（量化到 1e-6）。
+fn circle_key(center: [f64; 3], _axis: [f64; 3], radius: f64) -> String {
+    // **键里不含轴方向**：底面法线是 −Z、缓存的是 +Z，带上符号就永远匹配不上。
+    //
+    // 另外必须消灭 **负零**：`-0.0000` 和 `0.0000` 不是同一个字符串，
+    // 而圆心坐标是浮点运算的结果，很容易带出 -1e-19 这种值。
+    // 两个问题叠加时，顶/底面永远命中不了缓存——实测就是这个原因导致边数停在 35。
+    let q = |v: f64| if v.abs() < 1e-9 { 0.0 } else { v };
+    format!(
+        "{:.4},{:.4},{:.4}|{:.4}",
+        q(center[0]),
+        q(center[1]),
+        q(center[2]),
+        q(radius)
+    )
+}
+
+/// 写一条**闭合的整圆边**：起点和终点是同一个 `VERTEX_POINT`。
 ///
-/// **不能用 `CIRCULAR_ARC`**：它不是 ISO 10303-42 的核心实体（那是 AP242 的扩展），
-/// FreeCAD 读不认，把它退化成 `Line`——实测体积直接算成 6.67e+101。
-///
-/// **参考方向取弧起点**，角度固定 0 → π：
-/// - 所有弧都是半圆，两端正好落在 0 和 π 上，不需要算绝对角度；
-/// - 避开了 `end = 2π` 触周期边界的问题（那种弧 FreeCAD 认不出来）。
-fn arc_entity(
+/// 这是 OCC 的做法（对照 FreeCAD 导出的圆柱 STEP）：整圆就是一条 `CIRCLE` 曲线 +
+/// 一条首尾同点的 `EDGE_CURVE`，**不需要 `TRIMMED_CURVE`，也不需要拆半圆**。
+fn circle_edge(
     w: &mut P21,
-    from: [f64; 3],
+    on_circle: [f64; 3],
     center: [f64; 3],
     axis: [f64; 3],
     radius: f64,
-    half: bool,
+    vertex_ref: &str,
 ) -> String {
     let co = w.add(&format!("CARTESIAN_POINT('',{})", pt(center)));
     let ad = w.add(&format!("DIRECTION('',{})", pt(axis)));
-    let rdir = normalize(sub(from, center)).unwrap_or([1.0, 0.0, 0.0]);
+    // 参考方向：圆心指向圆上那个点（角度零点）
+    let rdir = normalize(sub(on_circle, center)).unwrap_or([1.0, 0.0, 0.0]);
     let rd = w.add(&format!("DIRECTION('',{})", pt(rdir)));
     let pl = w.add(&format!("AXIS2_PLACEMENT_3D('',{co},{ad},{rd})"));
     let circle = w.add(&format!("CIRCLE('',{pl},{})", num(radius)));
-    let sweep = if half {
-        std::f64::consts::PI
-    } else {
-        std::f64::consts::TAU
-    };
     w.add(&format!(
-        "TRIMMED_CURVE('',{circle},(PARAMETER_VALUE(0.)),(PARAMETER_VALUE({})),.T.,.PARAMETER.)",
-        num(sweep)
+        "EDGE_CURVE('',{v},{v},{circle},.T.)",
+        v = vertex_ref
     ))
+}
+
+/// 检测一个环是不是圆：所有顶点到质心距离一致 → 返回 (圆心, 半径)。
+fn detect_circle(solid: &Solid, ring: &[u32], normal: [f64; 3]) -> Option<([f64; 3], f64)> {
+    if ring.len() < 8 {
+        return None;
+    }
+    let n = ring.len() as f64;
+    let mut c = [0.0; 3];
+    for &i in ring {
+        let p = solid.verts[i as usize];
+        for (ck, pk) in c.iter_mut().zip(p.iter()) {
+            *ck += *pk;
+        }
+    }
+    for ck in c.iter_mut() {
+        *ck /= n;
+    }
+    let mut r_min = f64::MAX;
+    let mut r_max = 0.0f64;
+    for &i in ring {
+        let p = solid.verts[i as usize];
+        let d = sub(p, c);
+        // 先去掉法线方向分量（顶点可能不严格共面）
+        let h = dot(d, normal);
+        let rad = [
+            d[0] - normal[0] * h,
+            d[1] - normal[1] * h,
+            d[2] - normal[2] * h,
+        ];
+        let r = dot(rad, rad).sqrt();
+        r_min = r_min.min(r);
+        r_max = r_max.max(r);
+    }
+    if r_max <= 0.0 || (r_max - r_min) / r_max > 0.01 {
+        return None;
+    }
+    Some((c, (r_min + r_max) * 0.5))
 }
 
 fn verts_of(solid: &Solid, i: u32) -> [f64; 3] {
