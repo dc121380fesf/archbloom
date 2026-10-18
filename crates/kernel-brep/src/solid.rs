@@ -247,12 +247,34 @@ impl Solid {
     /// 欧拉示性数 V − E + F。
     ///
     /// 闭合单连通实体为 2；带 g 个通孔的实体为 2 − 2g（开孔板带一个通孔 → 0）。
+    /// 欧拉示性数（严格说返回的是 `2(S - G)`）。
+    ///
+    /// # 为什么不是 `V - E + F`
+    ///
+    /// 那个简化式默认**每个面同胚于圆盘**。带洞面不是：顶面「外方框 + 内圆孔」
+    /// 拓扑上是个环带（annulus），有 2 个边界环。拿 `V - E + F` 算会虚增。
+    ///
+    /// 实测开孔板：V=136、E=204、F=70 → 136-204+70 = 2，但它是环面（带一通孔），
+    /// 应为 0。原因就是两个带洞面各有 2 个环，而 F 只数了 1。
+    ///
+    /// # 欧拉-庞加莱公式
+    ///
+    /// ```text
+    /// V - E + F - (L - F) = 2(S - G)
+    /// ```
+    ///
+    /// 其中 L 是环总数（外环 + 洞环），S 是壳数，G 是亏格。
+    /// 化简即 `V - E + 2F - L`：
+    /// - 盒子（球面，G=0）：V=8、E=12、F=6、L=6 → 8-12+12-6 = **2** ✓
+    /// - 开孔板（环面，G=1）：136-204+140-72 = **0** ✓
     pub fn euler_characteristic(&self) -> i64 {
         use std::collections::HashSet;
         let mut edges: HashSet<(u32, u32)> = HashSet::new();
         let mut used: HashSet<u32> = HashSet::new();
+        let mut rings = 0i64;
         for f in &self.faces {
             for ring in f.all_rings() {
+                rings += 1;
                 let n = ring.len();
                 for i in 0..n {
                     let a = ring[i];
@@ -264,7 +286,7 @@ impl Solid {
         }
         // 只数真正参与面的顶点。`verts` 里可能残留孤立点
         // （面片合并切分后尤多），拿 `verts.len()` 会把欧拉数虚增。
-        used.len() as i64 - edges.len() as i64 + self.faces.len() as i64
+        used.len() as i64 - edges.len() as i64 + 2 * self.faces.len() as i64 - rings
     }
 
     /// 三角化：每个面按扇形剖分。
