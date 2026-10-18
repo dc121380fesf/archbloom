@@ -555,7 +555,13 @@ document.getElementById('shot').onclick = async () => {
 
 // ─── 零件工作台 ───
 // 与建筑场景平行：左边这栏走 B-rep 内核，输出的是精确几何与 STEP。
+//
+// 注意：`invoke` 要在**本作用域内重新取**。主 IIFE 里的 `const invoke` 是局部的，
+// 这里直接引用会抛 ReferenceError（不是 undefined），导致整块代码不执行、
+// 按钮一个也不响应。
 (function partWorkbench() {
+  const invoke =
+    window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
   const $ = (id) => document.getElementById(id);
   const info = $('pinfo');
   let busy = false;
