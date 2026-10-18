@@ -96,7 +96,13 @@ pub fn to_step(solid: &Solid, name: &str) -> String {
 /// 在此之前，这个入口直接返回全平面结果——**宁可输出已知正确的多面体，
 /// 也不输出一份“看起来有曲面但几何错”的文件**。
 pub fn to_step_curved(solid: &Solid, name: &str) -> String {
-    to_step_impl(solid, name, true)
+    // 导出前把洞修成真正的圆（用圆柱端圆）。
+    //
+    // **不改原实体**：修洞会改变洞的边界（锯齿 → 圆），这是「几何表示」的变化。
+    // 实体本身保持原样（73 面、体积精确），只有导出的 STEP 用规整后的边界。
+    let mut work = solid.clone();
+    crate::fix_holes::fix_holes_with_cylinder_rings(&mut work);
+    to_step_impl(&work, name, true)
 }
 
 fn to_step_impl(solid: &Solid, name: &str, use_cylinders: bool) -> String {
@@ -178,6 +184,9 @@ fn to_step_impl(solid: &Solid, name: &str, use_cylinders: bool) -> String {
     // OCC 的输出就是这么做的（顶面、底面各用一条 ORIENTED_EDGE 引同一批圆边）。
     let mut circle_edges: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    // 每条圆边的顶点集合（供洞比对用，比坐标 key 可靠）
+    let mut circle_rings: std::collections::HashMap<String, Vec<u32>> =
+        std::collections::HashMap::new();
     if use_cylinders {
         let mut groups: std::collections::HashMap<String, (Surface, Vec<usize>)> =
             std::collections::HashMap::new();
@@ -207,9 +216,15 @@ fn to_step_impl(solid: &Solid, name: &str, use_cylinders: bool) -> String {
             if idxs.len() < 4 {
                 continue;
             }
-            if let Some(face_ref) =
-                emit_cylinder_side(&mut w, solid, idxs, surf, &vpoint, &mut circle_edges)
-            {
+            if let Some(face_ref) = emit_cylinder_side(
+                &mut w,
+                solid,
+                idxs,
+                surf,
+                &vpoint,
+                &mut circle_edges,
+                &mut circle_rings,
+            ) {
                 face_refs.push(face_ref);
                 for &i in idxs {
                     consumed.insert(i);
@@ -255,45 +270,26 @@ fn to_step_impl(solid: &Solid, name: &str, use_cylinders: bool) -> String {
         // 这是壳能闭合的关键。顶面如果还用 16 段折线，它就和侧面的整圆边对不上，
         // OCC 会把它们当两个不相关的壳。
         if use_cylinders {
-            let det = detect_circle(solid, ring, normal);
-            if let Some((c_center, c_radius)) = det {
-                let key = circle_key(c_center, normal, c_radius);
-                if let Some(edge) = circle_edges.get(&key) {
-                    // 这个平面可能是「外环 + 圆洞」（开孔板的顶/底面）。
-                    // 外环是折线没关系，但**洞必须是圆边**——否则它和孔壁曲面的圆边对不上，
-                    // 壳在孔口处断成两半（实测体积 2131 vs 理论 1607、闭合 False）。
-                    let mut bounds: Vec<String> = Vec::new();
-                    let plane_origin =
-                        w.add(&format!("CARTESIAN_POINT('',{})", pt(verts[0])));
-                    let p_axis = w.add(&format!("DIRECTION('',{})", pt(normal)));
-                    let p_ref = w.add(&format!("DIRECTION('',{})", pt(pick_reference(normal))));
-                    let p_pl = w.add(&format!(
-                        "AXIS2_PLACEMENT_3D('',{plane_origin},{p_axis},{p_ref})"
-                    ));
-                    let p_surf = w.add(&format!("PLANE('',{p_pl})"));
-
-                    // 外环：用缓存的圆边
-                    {
-                        let oe = w.add(&format!("ORIENTED_EDGE('',*,*,{edge},.T.)"));
-                        let lid = w.add(&format!("EDGE_LOOP('',({oe}))"));
-                        bounds.push(w.add(&format!("FACE_OUTER_BOUND('',{lid},.T.)")));
-                    }
-                    // 内环（洞）：如果也是圆，用缓存的圆边
-                    for hole in &f.holes {
-                        if let Some((hc, hr)) = detect_circle(solid, hole, normal) {
-                            if let Some(hedge) = circle_edges.get(&circle_key(hc, normal, hr)) {
-                                let oe = w.add(&format!("ORIENTED_EDGE('',*,*,{hedge},.F.)"));
-                                let lid = w.add(&format!("EDGE_LOOP('',({oe}))"));
-                                bounds.push(w.add(&format!("FACE_BOUND('',{lid},.T.)")));
-                            }
-                        }
-                    }
-                    face_refs.push(w.add(&format!(
-                        "ADVANCED_FACE('',({}),{p_surf},.T.)",
-                        P21::ref_list(&bounds)
-                    )));
-                    continue;
-                }
+            let outer_round = detect_circle(solid, ring, normal)
+                .and_then(|(c, r)| circle_edges.get(&circle_key(c, normal, r)).cloned());
+            if let Some(edge) = outer_round {
+                // 外环本身就是圆（圆柱端面）：一条闭合边就完事
+                let mut bounds: Vec<String> = Vec::new();
+                let plane_origin = w.add(&format!("CARTESIAN_POINT('',{})", pt(verts[0])));
+                let p_axis = w.add(&format!("DIRECTION('',{})", pt(normal)));
+                let p_ref = w.add(&format!("DIRECTION('',{})", pt(pick_reference(normal))));
+                let p_pl = w.add(&format!(
+                    "AXIS2_PLACEMENT_3D('',{plane_origin},{p_axis},{p_ref})"
+                ));
+                let p_surf = w.add(&format!("PLANE('',{p_pl})"));
+                let oe = w.add(&format!("ORIENTED_EDGE('',*,*,{edge},.T.)"));
+                let lid = w.add(&format!("EDGE_LOOP('',({oe}))"));
+                bounds.push(w.add(&format!("FACE_OUTER_BOUND('',{lid},.T.)")));
+                face_refs.push(w.add(&format!(
+                    "ADVANCED_FACE('',({}),{p_surf},.T.)",
+                    P21::ref_list(&bounds)
+                )));
+                continue;
             }
         }
 
@@ -344,10 +340,62 @@ fn to_step_impl(solid: &Solid, name: &str, use_cylinders: bool) -> String {
             "EDGE_LOOP('',({}))",
             P21::ref_list(&oriented)
         ));
-        let bound = w.add(&format!("FACE_OUTER_BOUND('',{loop_id},.T.)"));
+        let mut bounds_v: Vec<String> = Vec::new();
+        bounds_v.push(w.add(&format!("FACE_OUTER_BOUND('',{loop_id},.T.)")));
+
+        // 洞：如果是圆（与孔壁曲面的端圆同一个），用一条闭合圆边；
+        // 否则退回折线。这一步不能嵌在「外环是圆」分支里——
+        // 顶面外环是 133 点折线，嵌进去就永远不会执行。
+        for hole in &f.holes {
+            if use_cylinders {
+                if let Some((hc, hr)) = detect_circle(solid, hole, normal) {
+                    if let Some(hedge) = circle_edges.get(&circle_key(hc, normal, hr)) {
+                        let oe = w.add(&format!("ORIENTED_EDGE('',*,*,{hedge},.F.)"));
+                        let lid = w.add(&format!("EDGE_LOOP('',({oe}))"));
+                        bounds_v.push(w.add(&format!("FACE_BOUND('',{lid},.T.)")));
+                        continue;
+                    }
+                }
+            }
+            // 折线洞
+            let mut h_oriented: Vec<String> = Vec::new();
+            for i in 0..hole.len() {
+                let a = hole[i];
+                let b = hole[(i + 1) % hole.len()];
+                if a == b {
+                    continue;
+                }
+                let key = if a < b { (a, b) } else { (b, a) };
+                let forward = a < b;
+                let (edge_curve, _s, _e) = edge_ids.entry(key).or_insert_with(|| {
+                    let va = &verts_of(solid, key.0);
+                    let vb = &verts_of(solid, key.1);
+                    let dir = normalize(sub(*vb, *va)).unwrap_or([1.0, 0.0, 0.0]);
+                    let o = w.add(&format!("CARTESIAN_POINT('',{})", pt(*va)));
+                    let d = w.add(&format!("DIRECTION('',{})", pt(dir)));
+                    let vec = w.add(&format!("VECTOR('',{d},1.)"));
+                    let line = w.add(&format!("LINE('',{o},{vec})"));
+                    let ec = w.add(&format!(
+                        "EDGE_CURVE('',{},{},{line},.T.)",
+                        vpoint[key.0 as usize], vpoint[key.1 as usize]
+                    ));
+                    (ec, key.0, key.1)
+                });
+                let orient = if forward { ".T." } else { ".F." };
+                h_oriented.push(w.add(&format!(
+                    "ORIENTED_EDGE('',*,*,{edge_curve},{orient})"
+                )));
+            }
+            if h_oriented.len() >= 3 {
+                let hid = w.add(&format!("EDGE_LOOP('',({}))", P21::ref_list(&h_oriented)));
+                bounds_v.push(w.add(&format!("FACE_BOUND('',{hid},.T.)")));
+            }
+        }
+
         // 面法线与曲面法线同向 → same_sense = .T.
         let face = w.add(&format!(
-            "ADVANCED_FACE('',({bound}),{surface},.T.)"
+            "ADVANCED_FACE('',({}),{surface},.T.)",
+            P21::ref_list(&bounds_v)
         ));
         face_refs.push(face);
     }
@@ -386,6 +434,7 @@ fn emit_cylinder_side(
     surface: &Surface,
     vpoint: &[String],
     circles: &mut std::collections::HashMap<String, String>,
+    circle_rings: &mut std::collections::HashMap<String, Vec<u32>>,
 ) -> Option<String> {
     let Surface::Cylinder {
         origin,
@@ -525,6 +574,9 @@ fn emit_cylinder_side(
     // 缓存给顶/底面复用
     circles.insert(circle_key(top_center, axis, radius), top_circle.clone());
     circles.insert(circle_key(base_center, axis, radius), bot_circle.clone());
+    // 同时登记顶点集合，供平面面的洞比对
+    circle_rings.insert(top_circle.clone(), top.iter().map(|(_, v)| *v).collect());
+    circle_rings.insert(bot_circle.clone(), bot.iter().map(|(_, v)| *v).collect());
     // 母线：底 → 顶
     let seam = {
         let dir = normalize(sub(pt0, pb0))?;

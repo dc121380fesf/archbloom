@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use archcore_kernel::{Point3, Vector3};
 
 use crate::geom::{dot, normalize, sub, Surface};
-use crate::solid::{Face, Solid};
+use crate::solid::Solid;
 
 /// 一个圆柱面组在某个端面上的圆。
 struct EndCircle {
@@ -100,27 +100,59 @@ pub fn fix_holes_with_cylinder_rings(solid: &mut Solid) -> usize {
         solid.faces[fi].holes = new_holes;
     }
 
-    // 删除「完全落在洞内部」的面
+    // 删除「所有边都是孤边」的面
     //
-    // 换掉洞边界后，原洞边界上那些碎片面还在实体里，它们的边全变成孤边
-    // （实测 86 条），水密直接变 false。这些面是位置错乱的垃圾——真实几何里
-    // 洞内部不该有面。
+    // 换掉洞边界后，原顶/底面的碎片面（实测 66 点和 63 点、面积 2e-5）
+    // 与新的洞圆不再共享任何边 → 它们的边全部只被自己用，水密直接 false。
+    // 这些面在真实几何里就是垃圾。
     if fixed > 0 {
-        drop_faces_inside_holes(solid);
+        drop_orphan_faces(solid);
+        rebuild_vertex_pool(solid);
     }
 
     fixed
 }
 
-/// 删除所有顶点都落在某个洞内部的面。
-fn drop_faces_inside_holes(solid: &mut Solid) {
-    // 先收集所有洞（平面 + 圆），把它们投影成 2D 多边形
-    struct HolePoly {
+/// 重建顶点池：只保留被面引用的顶点。
+fn rebuild_vertex_pool(solid: &mut Solid) {
+    use std::collections::HashMap;
+    let mut remap: HashMap<u32, u32> = HashMap::new();
+    let mut verts: Vec<Point3> = Vec::new();
+    let mut keep = |old: u32, src: &[Point3], dst: &mut Vec<Point3>| -> u32 {
+        if let Some(&n) = remap.get(&old) {
+            return n;
+        }
+        let n = dst.len() as u32;
+        dst.push(src[old as usize]);
+        remap.insert(old, n);
+        n
+    };
+    let src = solid.verts.clone();
+    for f in &mut solid.faces {
+        f.verts = f.verts.iter().map(|&v| keep(v, &src, &mut verts)).collect();
+        for h in f.holes.iter_mut() {
+            *h = h.iter().map(|&v| keep(v, &src, &mut verts)).collect();
+        }
+    }
+    solid.verts = verts;
+}
+
+/// 删除与主面重叠的碎片面。
+///
+/// 换掉洞边界后，原顶/底面会留下一块碎片（实测 66 点和 63 点、面积 2e-5），
+/// 与新洞圆不再共享边。它既不是完整的面也不是洞的一部分——是与主面重叠的垃圾。
+///
+/// **删一个、查一次**：每删一个就重算孤边数，变多就撒回。
+/// 整批删除会多削掉顶面与侧面之间的一个小三角（实测 3 条孤边），
+/// 壳就漏气了。逐个确认可以把这个三角保住。
+fn drop_orphan_faces(solid: &mut Solid) {
+    struct Host {
         normal: Vector3,
         origin: Point3,
         pts: Vec<[f64; 2]>,
+        area: f64,
     }
-    let mut polys: Vec<HolePoly> = Vec::new();
+    let mut hosts: Vec<Host> = Vec::new();
     for f in &solid.faces {
         if f.holes.is_empty() {
             continue;
@@ -132,64 +164,104 @@ fn drop_faces_inside_holes(solid: &mut Solid) {
         let Some((u, w)) = crate::geom::orthonormal_basis(normal) else {
             continue;
         };
-        for h in &f.holes {
-            let origin = solid.verts[h[0] as usize];
-            let pts: Vec<[f64; 2]> = h
-                .iter()
-                .map(|&i| {
-                    let d = sub(solid.verts[i as usize], origin);
-                    [dot(d, u), dot(d, w)]
-                })
-                .collect();
-            polys.push(HolePoly {
-                normal,
-                origin,
-                pts,
-            });
-        }
+        let origin = solid.verts[f.verts[0] as usize];
+        let pts: Vec<[f64; 2]> = f
+            .verts
+            .iter()
+            .map(|&i| {
+                let d = sub(solid.verts[i as usize], origin);
+                [dot(d, u), dot(d, w)]
+            })
+            .collect();
+        let area = poly_area(&pts).abs();
+        hosts.push(Host {
+            normal,
+            origin,
+            pts,
+            area,
+        });
     }
-    if polys.is_empty() {
+    if hosts.is_empty() {
         return;
     }
 
-    let mut keep: Vec<Face> = Vec::with_capacity(solid.faces.len());
-    for f in solid.faces.drain(..) {
-        // 只考虑小面（面积小于洞的 1/4）——大面可能是真正的面
-        let mut drop = false;
-        for p in &polys {
-            // 顶点必须与该洞同平面
-            let mut all_in = true;
-            let Some((u, w)) = crate::geom::orthonormal_basis(p.normal) else {
+    // 找出所有候选（同平面 + 顶点在主面内 + 面积小）
+    let verts = solid.verts.clone();
+    let mut candidates: Vec<usize> = Vec::new();
+    for (fi, f) in solid.faces.iter().enumerate() {
+        if !f.holes.is_empty() {
+            continue;
+        }
+        'outer: for h in &hosts {
+            let Some((u, w)) = crate::geom::orthonormal_basis(h.normal) else {
                 continue;
             };
             for &v in f.all_rings().flatten() {
-                let d = sub(solid.verts[v as usize], p.origin);
-                let off = dot(d, p.normal);
-                if off.abs() > 1e-6 {
-                    all_in = false;
-                    break;
-                }
-                if !crate::fix_holes::point_in_poly(
-                    [dot(d, u), dot(d, w)],
-                    &p.pts,
-                ) {
-                    all_in = false;
-                    break;
+                let d = sub(verts[v as usize], h.origin);
+                if dot(d, h.normal).abs() > 1e-9 {
+                    continue 'outer;
                 }
             }
-            if all_in {
-                drop = true;
+            for &v in f.all_rings().flatten() {
+                let d = sub(verts[v as usize], h.origin);
+                if !point_in_poly([dot(d, u), dot(d, w)], &h.pts) {
+                    continue 'outer;
+                }
+            }
+            let pts: Vec<[f64; 2]> = f
+                .verts
+                .iter()
+                .map(|&i| {
+                    let d = sub(verts[i as usize], h.origin);
+                    [dot(d, u), dot(d, w)]
+                })
+                .collect();
+            if poly_area(&pts).abs() < h.area * 0.25 {
+                candidates.push(fi);
                 break;
             }
         }
-        if !drop {
-            keep.push(f);
+    }
+
+    for fi in candidates {
+        let baseline = count_lonely_edges(solid);
+        let removed = solid.faces.remove(fi);
+        let after = count_lonely_edges(solid);
+        if after > baseline {
+            // 删了会漏气：撒回
+            solid.faces.insert(fi, removed);
         }
     }
-    solid.faces = keep;
 }
 
-/// 射线法判点在多边形内。
+/// 统计只被一个面使用的边数。
+fn count_lonely_edges(solid: &Solid) -> usize {
+    let mut count: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
+    for f in &solid.faces {
+        for r in f.all_rings() {
+            for i in 0..r.len() {
+                let a = r[i];
+                let b = r[(i + 1) % r.len()];
+                let key = if a < b { (a, b) } else { (b, a) };
+                *count.entry(key).or_insert(0) += 1;
+            }
+        }
+    }
+    count.values().filter(|c| **c == 1).count()
+}
+
+fn poly_area(poly: &[[f64; 2]]) -> f64 {
+    let n = poly.len();
+    let mut s = 0.0;
+    for i in 0..n {
+        let a = poly[i];
+        let b = poly[(i + 1) % n];
+        s += a[0] * b[1] - b[0] * a[1];
+    }
+    s * 0.5
+}
+
+/// 射线法判点在多边形内（含边界附近）。
 pub fn point_in_poly(p: [f64; 2], poly: &[[f64; 2]]) -> bool {
     let n = poly.len();
     let mut inside = false;
