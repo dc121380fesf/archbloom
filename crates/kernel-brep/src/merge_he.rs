@@ -192,6 +192,45 @@ fn prev_of(s: &Solid, he: usize) -> usize {
     }
 }
 
+/// 把一个可能自交的顶点序列拆成若干简单环。
+///
+/// 半边拼接沿边消除后，一个 face 的所有半边未必形成多个独立环，
+/// 而是被「缝」连成的**蛇形环**（实测顶面 2894 点、1329 处重复顶点）。
+///
+/// 拆法：沿序列走，维护每个顶点在栈中的位置。遇到已在栈里的顶点 `v`，
+/// 说明从 `v` 上次出现到现在的这段自己闭合了——切出来当一个环，
+/// 栈回到 `v` 的位置继续。
+///
+/// 例：`[1,2,3,4,1,5,6,7,4,8]`
+/// - 遇 `1`（栈中位置 0）→ 切出 `[1,2,3,4]`，栈变 `[1]`
+/// - 继续 `5,6,7`，栈变 `[1,5,6,7]`
+/// - 遇 `4`（不在栈里了，已随上一步移除）→ 入栈
+/// - 最终 `[1,5,6,7,4,8]`
+fn split_rings(seq: &[u32]) -> Vec<Vec<u32>> {
+    let mut out: Vec<Vec<u32>> = Vec::new();
+    let mut stack: Vec<u32> = Vec::new();
+    let mut pos_at: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    for &v in seq {
+        if let Some(&p) = pos_at.get(&v) {
+            let sub: Vec<u32> = stack[p..].to_vec();
+            if sub.len() >= 3 {
+                out.push(sub);
+            }
+            // 移除 p 之后的所有点（保留位置 p 的 v）
+            for w in stack.drain(p + 1..) {
+                pos_at.remove(&w);
+            }
+        } else {
+            pos_at.insert(v, stack.len());
+            stack.push(v);
+        }
+    }
+    if stack.len() >= 3 {
+        out.push(stack);
+    }
+    out
+}
+
 /// 从半边链重建面表（含洞的切分）。
 fn rebuild_faces(s: &Solid) -> Vec<Face> {
     let mut visited: HashSet<usize> = HashSet::new();
@@ -206,26 +245,20 @@ fn rebuild_faces(s: &Solid) -> Vec<Face> {
     }
     for (fi, start_hes) in by_face {
         let mut rings: Vec<Vec<u32>> = Vec::new();
-        for &start in &start_hes {
-            if visited.contains(&start) {
-                continue;
+        let mut seq: Vec<u32> = Vec::new();
+        let mut cur = start_hes[0];
+        let stop = cur;
+        loop {
+            visited.insert(cur);
+            seq.push(s.half_edges[cur].origin);
+            cur = s.half_edges[cur].next;
+            if cur == stop || visited.contains(&cur) {
+                break;
             }
-            let mut ring = Vec::new();
-            let mut cur = start;
-            loop {
-                visited.insert(cur);
-                ring.push(s.half_edges[cur].origin);
-                cur = s.half_edges[cur].next;
-                if cur == start {
-                    break;
-                }
-                if visited.contains(&cur) {
-                    break;
-                }
-            }
-            if ring.len() >= 3 {
-                rings.push(ring);
-            }
+        }
+        // 蛇形环 → 简单环
+        for r in split_rings(&seq) {
+            rings.push(r);
         }
         if rings.is_empty() {
             continue;

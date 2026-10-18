@@ -250,6 +250,7 @@ impl Solid {
     pub fn euler_characteristic(&self) -> i64 {
         use std::collections::HashSet;
         let mut edges: HashSet<(u32, u32)> = HashSet::new();
+        let mut used: HashSet<u32> = HashSet::new();
         for f in &self.faces {
             for ring in f.all_rings() {
                 let n = ring.len();
@@ -257,10 +258,13 @@ impl Solid {
                     let a = ring[i];
                     let b = ring[(i + 1) % n];
                     edges.insert(if a < b { (a, b) } else { (b, a) });
+                    used.insert(a);
                 }
             }
         }
-        self.verts.len() as i64 - edges.len() as i64 + self.faces.len() as i64
+        // 只数真正参与面的顶点。`verts` 里可能残留孤立点
+        // （面片合并切分后尤多），拿 `verts.len()` 会把欧拉数虚增。
+        used.len() as i64 - edges.len() as i64 + self.faces.len() as i64
     }
 
     /// 三角化：每个面按扇形剖分。
