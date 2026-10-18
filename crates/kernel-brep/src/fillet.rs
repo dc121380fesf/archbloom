@@ -408,24 +408,32 @@ pub fn fillet_solid(
             })
             .collect();
         keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        // 扇形三角：球心 → 相邻两点
-        let ci = put!(*c);
-        let n = keyed.len();
-        for i in 0..n {
-            let a = keyed[i].1;
-            let b = keyed[(i + 1) % n].1;
-            let tri = dedup(vec![ci, put!(a), put!(b)]);
-            if tri.len() >= 3 {
-                let nrm = plane_normal(&out, &tri);
-                out.faces.push(Face {
-                    surface: Surface::Plane {
-                        origin: out.verts[tri[0] as usize],
-                        normal: nrm,
-                    },
-                    verts: tri,
-                    holes: Vec::new(),
-                });
-            }
+        // 角部：**不能用球心当顶点**——球心在实体内部，
+        // 把它当三角顶点会让三角面穿进实体（实测体积从 7.8 掉到 5.4）。
+        //
+        // 球面片的正确做法：边界就是轨道端点在球面上的那段弧，
+        // 面本身是球面的一部分。这里先用“球面上端点组成的多边形”近似（一个平面面），
+        // 弓高误差在 R 量级，比穿进实体好得多。
+        let ring: Vec<u32> = keyed
+            .iter()
+            .map(|(_, p)| {
+                let q = normalize(sub(*p, *c))
+                    .map(|d| add(*c, scale(d, r)))
+                    .unwrap_or(*p);
+                put!(q)
+            })
+            .collect();
+        let ring = dedup(ring);
+        if ring.len() >= 3 {
+            let nrm = plane_normal(&out, &ring);
+            out.faces.push(Face {
+                surface: Surface::Plane {
+                    origin: out.verts[ring[0] as usize],
+                    normal: nrm,
+                },
+                verts: ring,
+                holes: Vec::new(),
+            });
         }
     }
 
