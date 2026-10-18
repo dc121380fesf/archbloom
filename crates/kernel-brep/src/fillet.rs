@@ -1,31 +1,51 @@
 //! 圆角（fillet）：把锐边换成圆弧过渡。
 //!
-//! # 与倒角的区别
+//! # 按 SMLib 的流程重写
 //!
-//! | | chamfer | fillet |
-//! |---|---|---|
-//! | 连接面 | 一个平面 | 一段圆弧 |
-//! | 图纸 | `C0.5` | `R0.5` |
-//! | 加工 | 铣刀斜切 | 球头刀走弧 |
+//! 参考 NVIDIA SMLib 文档（<https://docs.nvidia.com/smlib/manual/smlib/fillets>）：
 //!
-//! # 几何（凸边）
+//! > "**Rail Curves** are calculated first, before the fillet surface itself, and their
+//! > intersections with other body topology **largely determine the overall filleting
+//! > situation**."
+//!
+//! 所以顺序是：**轨线 → 圆角面 → 角部**。不是「每条边算一对切点」。
+//!
+//! # 三个核心概念
+//!
+//! ## 轨线（Rail Curve）
+//!
+//! 圆角面与原始面的交线。对一条边、一个侧面：
 //!
 //! ```text
-//! m1 = -n1, m2 = -n2        （内法线）
-//! bis = normalize(m1 + m2)  （角平分线）
-//! θ  = π - acos(n1·n2)      （内部二面角）
-//! c  = 边点 + bis * (R / sin(θ/2))   圆心
-//! p1 = c - R*m1            切点，落在 f1 上
-//! p2 = c - R*m2            切点，落在 f2 上
+//! 轨线 = 面上距边 R 的直线（平行于边）
 //! ```
 //!
-//! 90° 凸边 R=0.2 时 `c=(0.2,0.2)`，切点 `(0.2,0)` `(0,0.2)`——距边都是 R。
+//! 轨线一直延伸到边的两端，在角部与**球面相交**——那个交点才是真正的边界终点。
 //!
-//! # 当前实现：离散逼近
+//! ## 球心（顶点处）
 //!
-//! 圆弧离散成 `segments` 段平面条，先验证几何（体积/水密/欧拉）。
-//! 真圆柱面版本等离散版验收通过再做——STEP 那边已经能写
-//! `CYLINDRICAL_SURFACE` 了，缺的是把这里每段平面换成一段弧。
+//! 盒子的角是 SMLib 分类里的 **NxN Same-Convexity Corner**，原文说
+//! "the corner will be an analytical surface (**Sphere**)"。
+//!
+//! 球心要**精确求解**：到顶点周围每个面的距离都等于 R。
+//!
+//! ```text
+//! 对每个相邻面 i：(c - v) · m_i = R      （m_i = -n_i 是内法线）
+//! 三个面 → 三元一次方程组 → Cramer 法则
+//! ```
+//!
+//! 盒子角 (0,0,0)、R=0.2 时解出 `c = (0.2, 0.2, 0.2)`——到三个面都是 R。
+//!
+//! ## 轨线端点 = 轨线 ∩ 球面
+//!
+//! 把轨线参数化成 `p(t) = p0 + t·e`，代入 `|p - c|² = R²` 解二次方程，
+//! 取靠近边的那个根。
+//!
+//! # 为什么不能复用倒角
+//!
+//! 倒角的内缩点是「面内两个方向都退 R」的交点 `(0.2, 0.2, 0)`；
+//! 圆角的轨线端点是「只退一个方向，再与球面求交」`(0.2, 0, 0)` 附近。
+//! 两者不同——复用过一次，弧的半径从 0.2 变成 0.346，体积差 39%。
 
 use std::collections::HashMap;
 
@@ -39,7 +59,7 @@ use crate::solid::{Face, Solid};
 #[derive(Clone, Copy, Debug)]
 pub struct FilletOptions {
     pub radius: f64,
-    /// 每条边的圆弧用几段平面逼近。
+    /// 圆弧离散段数。
     pub segments: usize,
 }
 
@@ -52,32 +72,22 @@ impl Default for FilletOptions {
     }
 }
 
-/// 一条边的圆角几何。
-struct Fillet {
-    /// 只用于调试与后续的角部处理（当前实现未读）。
-    #[allow(dead_code)]
-    a: u32,
-    #[allow(dead_code)]
-    b: u32,
-    #[allow(dead_code)]
-    f1: usize,
-    #[allow(dead_code)]
-    f2: usize,
-    m1: Vector3,
-    m2: Vector3,
+/// 一条边的两条轨线（每侧一条）。
+struct Rails {
+    /// 面 f1 上的轨线：起点、方向（已延伸到球面端点）
+    f1_start: Point3,
+    f1_end: Point3,
+    /// 面 f2 上
+    f2_start: Point3,
+    f2_end: Point3,
+    /// 圆角轴心线两端（圆心）
     ca: Point3,
     cb: Point3,
-    /// 两端在 f1 上的切点
-    a1: Point3,
-    b1: Point3,
-    /// 两端在 f2 上的切点（角部处理要用）
-    #[allow(dead_code)]
-    a2: Point3,
-    #[allow(dead_code)]
-    b2: Point3,
+    m1: Vector3,
+    m2: Vector3,
 }
 
-/// 对实体做圆角（离散逼近）。
+/// 对实体做圆角。返回新实体。
 pub fn fillet_solid(
     solid: &Solid,
     edges: &[u64],
@@ -120,11 +130,47 @@ pub fn fillet_solid(
         return Ok(solid.clone());
     }
 
-    // ── 1. 每条选中边的圆角几何 ──
-    let mut fillets: Vec<Fillet> = Vec::new();
-    // (面, 顶点) → 该面上的切点
-    let mut cuts: HashMap<(usize, u32), Vec<Point3>> = HashMap::new();
+    let r = opts.radius;
 
+    // ── 1. 每个顶点的球心 ──
+    // 顶点 → (球心, 相邻面列表)
+    let mut spheres: HashMap<u32, (Point3, Vec<usize>)> = HashMap::new();
+    let mut verts_of_edge: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (i, e) in table.iter().enumerate() {
+        if !selected[i] {
+            continue;
+        }
+        for v in [e.a, e.b] {
+            let entry = verts_of_edge.entry(v).or_default();
+            if !entry.contains(&i) {
+                entry.push(i);
+            }
+        }
+    }
+    for (&v, edge_ids) in &verts_of_edge {
+        let mut faces: Vec<usize> = Vec::new();
+        for &ei in edge_ids {
+            for fi in [table[ei].f1, table[ei].f2] {
+                if !faces.contains(&fi) {
+                    faces.push(fi);
+                }
+            }
+        }
+        if faces.len() < 3 {
+            // 只有两个面参与（单边圆角）：角部是「轨线延伸到相邻边」，另算
+            continue;
+        }
+        let mut ns: Vec<Vector3> = faces.iter().map(|&fi| face_normal(solid, fi)).collect();
+        // 取前三个面解 3x3
+        ns.truncate(3);
+        let pv = solid.verts[v as usize];
+        if let Some(c) = solve_sphere_center(pv, &ns, r) {
+            spheres.insert(v, (c, faces));
+        }
+    }
+
+    // ── 2. 每条边的两条轨线（端点与球面求交） ──
+    let mut rails: HashMap<(u32, u32), Rails> = HashMap::new();
     for (i, e) in table.iter().enumerate() {
         if !selected[i] {
             continue;
@@ -142,41 +188,67 @@ pub fn fillet_solid(
         if sin_half.abs() < 1e-9 {
             continue;
         }
-        let d = opts.radius / sin_half;
+        let d = r / sin_half;
         let pa = solid.verts[e.a as usize];
         let pb = solid.verts[e.b as usize];
         let ca = add(pa, scale(bis, d));
         let cb = add(pb, scale(bis, d));
-        let a1 = sub(ca, scale(m1, opts.radius));
-        let b1 = sub(cb, scale(m1, opts.radius));
-        let a2 = sub(ca, scale(m2, opts.radius));
-        let b2 = sub(cb, scale(m2, opts.radius));
 
-        cuts.entry((e.f1, e.a)).or_default().push(a1);
-        cuts.entry((e.f1, e.b)).or_default().push(b1);
-        cuts.entry((e.f2, e.a)).or_default().push(a2);
-        cuts.entry((e.f2, e.b)).or_default().push(b2);
+        // 轨线：面上距边 R、平行于边的直线。
+        //
+        // 方向靠「边点 → 圆心」再投影到面内得到。
+        // **不能用 cross(n, edir)**——它的符号依赖环方向，盒子两个面一个对一个反，
+        // 实测体积会超过原体积（8.01 / 8.65），说明弧朝外凸了。
+        let edir = normalize(sub(pb, pa)).unwrap_or([1.0, 0.0, 0.0]);
+        let dir1 = {
+            let d = sub(ca, pa);
+            let proj = sub(d, scale(n1, dot(d, n1)));
+            normalize(proj).unwrap_or([0.0, 0.0, 1.0])
+        };
+        let dir2 = {
+            let d = sub(cb, pb);
+            let proj = sub(d, scale(n2, dot(d, n2)));
+            normalize(proj).unwrap_or([0.0, 0.0, 1.0])
+        };
+        // 轨线起点：距边 R
+        let rp1 = add(pa, scale(dir1, r));
+        let rp2 = add(pa, scale(dir2, r));
 
-        fillets.push(Fillet {
-            a: e.a,
-            b: e.b,
-            f1: e.f1,
-            f2: e.f2,
-            m1,
-            m2,
-            ca,
-            cb,
-            a1,
-            b1,
-            a2,
-            b2,
-        });
+        // 端点：与两端球面求交
+        let a1 = trim_to_sphere(rp1, edir, spheres.get(&e.a), r).unwrap_or(rp1);
+        let b1 = trim_to_sphere(
+            add(pb, scale(dir1, r)),
+            edir,
+            spheres.get(&e.b),
+            r,
+        )
+        .unwrap_or(add(pb, scale(dir1, r)));
+        let a2 = trim_to_sphere(rp2, edir, spheres.get(&e.a), r).unwrap_or(rp2);
+        let b2 = trim_to_sphere(
+            add(pb, scale(dir2, r)),
+            edir,
+            spheres.get(&e.b),
+            r,
+        )
+        .unwrap_or(add(pb, scale(dir2, r)));
+
+        rails.insert(
+            (e.a, e.b),
+            Rails {
+                f1_start: a1,
+                f1_end: b1,
+                f2_start: a2,
+                f2_end: b2,
+                ca,
+                cb,
+                m1,
+                m2,
+            },
+        );
     }
-    if fillets.is_empty() {
-        return Ok(solid.clone());
-    }
+    let _ = verts_of_edge;
 
-    // ── 2. 组装 ──
+    // ── 3. 组装 ──
     let mut out = Solid::default();
     let mut weld: HashMap<(i64, i64, i64), u32> = HashMap::new();
     macro_rules! put {
@@ -197,20 +269,29 @@ pub fn fillet_solid(
         }};
     }
 
-    // 2a) 原面：顶点被圆角的，换成切点
+    // 3a) 原面：顶点被圆角边连着的，换成轨线端点
+    // (面, 原顶点) → 该面上的轨线端点
+    let mut cut: HashMap<(usize, u32), Point3> = HashMap::new();
+    for (i, e) in table.iter().enumerate() {
+        if !selected[i] {
+            continue;
+        }
+        let Some(rl) = rails.get(&(e.a, e.b)) else {
+            continue;
+        };
+        cut.insert((e.f1, e.a), rl.f1_start);
+        cut.insert((e.f1, e.b), rl.f1_end);
+        cut.insert((e.f2, e.a), rl.f2_start);
+        cut.insert((e.f2, e.b), rl.f2_end);
+    }
     for (fi, f) in solid.faces.iter().enumerate() {
         let n = f.verts.len();
         let mut ring: Vec<u32> = Vec::with_capacity(n);
         for i in 0..n {
             let cur = f.verts[i];
-            match cuts.get(&(fi, cur)) {
-                Some(ps) if !ps.is_empty() => {
-                    // 一个顶点可能有多条圆角边交汇：取第一个切点，保证拓扑连通
-                    for p in ps {
-                        ring.push(put!(*p));
-                    }
-                }
-                _ => ring.push(put!(solid.verts[cur as usize])),
+            match cut.get(&(fi, cur)) {
+                Some(p) => ring.push(put!(*p)),
+                None => ring.push(put!(solid.verts[cur as usize])),
             }
         }
         let ring = dedup(ring);
@@ -223,42 +304,43 @@ pub fn fillet_solid(
         }
     }
 
-    // 2b) 每条边：segments 段平面条逼近圆弧
-    for ft in &fillets {
-        let seg = opts.segments.max(2);
-        let axis = match normalize(sub(ft.cb, ft.ca)) {
-            Some(x) => x,
-            None => continue,
+    // 3b) 每条边：segments 段弧
+    for (i, e) in table.iter().enumerate() {
+        if !selected[i] {
+            continue;
+        }
+        let Some(rl) = rails.get(&(e.a, e.b)) else {
+            continue;
         };
-        // 圆弧从 m1 转到 m2，总角 = π - acos(m1·m2)
-        // 圆弧从切点1 转向切点2。
-        //
-        // 关键是**方向从圆心指向切点**，也就是 -m1 → -m2，
-        // 而不是 m1 → m2（那是反的，弧会被甩到实体外面，实测 z 跑到 0.38）。
-        let from_dir = scale(ft.m1, -1.0);
-        let to_dir = scale(ft.m2, -1.0);
+        let seg = opts.segments.max(2);
+        let axis = normalize(sub(rl.cb, rl.ca)).unwrap_or([0.0, 0.0, 1.0]);
+        let from_dir = normalize(sub(rl.f1_start, rl.ca)).unwrap_or(rl.m1);
+        let to_dir = normalize(sub(rl.f2_start, rl.ca)).unwrap_or(rl.m2);
         let total = dot(from_dir, to_dir).clamp(-1.0, 1.0).acos();
-        // 绕边方向的转向：用叉积符号判断正负
         let sign = if dot(cross(from_dir, to_dir), axis) >= 0.0 {
             1.0
         } else {
             -1.0
         };
-        let mut prev_a = ft.a1;
-        let mut prev_b = ft.b1;
+        let mut prev_a = put!(rl.f1_start);
+        let mut prev_b = put!(rl.f1_end);
         for s in 1..=seg {
             let t = s as f64 / seg as f64;
             let ang = total * t * sign;
-            let dir = rotate(from_dir, to_dir, axis, ang);
-            let cur_a = add(ft.ca, scale(dir, opts.radius));
-            let cur_b = add(ft.cb, scale(dir, opts.radius));
-            let quad = vec![
-                put!(prev_a),
-                put!(prev_b),
-                put!(cur_b),
-                put!(cur_a),
-            ];
-            let quad = dedup(quad);
+            let dir = rotate(from_dir, axis, ang);
+            let cur_a = add(rl.ca, scale(dir, r));
+            let cur_b = add(rl.cb, scale(dir, r));
+            let va = if s == seg {
+                put!(rl.f2_start)
+            } else {
+                put!(cur_a)
+            };
+            let vb = if s == seg {
+                put!(rl.f2_end)
+            } else {
+                put!(cur_b)
+            };
+            let quad = dedup(vec![prev_a, prev_b, vb, va]);
             if quad.len() >= 3 {
                 let nrm = plane_normal(&out, &quad);
                 out.faces.push(Face {
@@ -270,8 +352,80 @@ pub fn fillet_solid(
                     holes: Vec::new(),
                 });
             }
-            prev_a = cur_a;
-            prev_b = cur_b;
+            prev_a = va;
+            prev_b = vb;
+        }
+    }
+
+    // 3c) 角部：球面片
+    // 每个顶点，收集它周围所有「轨线端点」，按绕内法线角度排序，
+    // 以球心为顶点做扇形三角（球面三角的离散）。
+    for (&v, (c, faces_at_v)) in &spheres {
+        let pv = solid.verts[v as usize];
+        let mut ring_pts: Vec<Point3> = Vec::new();
+        for (i, e) in table.iter().enumerate() {
+            if !selected[i] || (e.a != v && e.b != v) {
+                continue;
+            }
+            let Some(rl) = rails.get(&(e.a, e.b)) else {
+                continue;
+            };
+            let (p1, p2) = if e.a == v {
+                (rl.f1_start, rl.f2_start)
+            } else {
+                (rl.f1_end, rl.f2_end)
+            };
+            ring_pts.push(p1);
+            ring_pts.push(p2);
+        }
+        // 去重
+        let mut uniq: Vec<Point3> = Vec::new();
+        for p in ring_pts {
+            if !uniq.iter().any(|q| dist2(*q, p) < 1e-18) {
+                uniq.push(p);
+            }
+        }
+        if uniq.len() < 3 {
+            continue;
+        }
+        // 绕内法线排序
+        let mut inner = [0.0; 3];
+        for &fi in faces_at_v {
+            let n = face_normal(solid, fi);
+            for k in 0..3 {
+                inner[k] -= n[k];
+            }
+        }
+        let Some(in_n) = normalize(inner) else { continue };
+        let Some((u, w)) = crate::geom::orthonormal_basis(in_n) else {
+            continue;
+        };
+        let mut keyed: Vec<(f64, Point3)> = uniq
+            .into_iter()
+            .map(|p| {
+                let d = sub(p, pv);
+                (dot(d, w).atan2(dot(d, u)), p)
+            })
+            .collect();
+        keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        // 扇形三角：球心 → 相邻两点
+        let ci = put!(*c);
+        let n = keyed.len();
+        for i in 0..n {
+            let a = keyed[i].1;
+            let b = keyed[(i + 1) % n].1;
+            let tri = dedup(vec![ci, put!(a), put!(b)]);
+            if tri.len() >= 3 {
+                let nrm = plane_normal(&out, &tri);
+                out.faces.push(Face {
+                    surface: Surface::Plane {
+                        origin: out.verts[tri[0] as usize],
+                        normal: nrm,
+                    },
+                    verts: tri,
+                    holes: Vec::new(),
+                });
+            }
         }
     }
 
@@ -280,34 +434,87 @@ pub fn fillet_solid(
     Ok(out)
 }
 
-/// 把方向 m1 绕 axis 转到 m2 方向上的 ang 弧度。
-fn rotate(m1: Vector3, m2: Vector3, axis: Vector3, ang: f64) -> Vector3 {
-    // Rodrigues：v' = v cosθ + (k×v) sinθ + k(k·v)(1-cosθ)
+/// 解球心：`(c - v) · m_i = R`，三个面 → 三元一次方程组。
+///
+/// 用 Cramer 法则解 3x3。行列式太小时返回 None（三面近乎共面）。
+fn solve_sphere_center(v: Point3, normals: &[Vector3], r: f64) -> Option<Point3> {
+    if normals.len() < 3 {
+        return None;
+    }
+    let m: Vec<Vector3> = normals.iter().map(|n| scale(*n, -1.0)).collect();
+    let (a1, a2, a3) = (m[0], m[1], m[2]);
+    let det = dot(a1, cross(a2, a3));
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    // RHS 全为 r（因为 c·m_i - v·m_i = R → c·m_i = R + v·m_i）
+    let b: Vec<f64> = (0..3).map(|i| r + dot(v, m[i])).collect();
+    // Cramer
+    let x = dot([b[0], b[1], b[2]], cross(a2, a3)) / det;
+    let y = dot(a1, cross([b[0], b[1], b[2]], a3)) / det;
+    let z = dot(a1, cross(a2, [b[0], b[1], b[2]])) / det;
+    Some([x, y, z])
+}
+
+/// 把轨线起点沿边方向推到球面上（取靠边的根）。
+fn trim_to_sphere(
+    p0: Point3,
+    dir: Vector3,
+    sphere: Option<&(Point3, Vec<usize>)>,
+    r: f64,
+) -> Option<Point3> {
+    let (c, _) = sphere?;
+    // |p0 + t*dir - c|² = r²
+    let d = sub(p0, *c);
+    let a = dot(dir, dir);
+    let b = 2.0 * dot(d, dir);
+    let cc = dot(d, d) - r * r;
+    let disc = b * b - 4.0 * a * cc;
+    if disc < 0.0 {
+        return None;
+    }
+    let sq = disc.sqrt();
+    let t1 = (-b + sq) / (2.0 * a);
+    let t2 = (-b - sq) / (2.0 * a);
+    // 取较小的正根（离边最近）
+    let t = if t1.abs() < t2.abs() {
+        t1
+    } else {
+        t2
+    };
+    Some(add(p0, scale(dir, t)))
+}
+
+fn rotate(v: Vector3, axis: Vector3, ang: f64) -> Vector3 {
     let k = normalize(axis).unwrap_or([0.0, 0.0, 1.0]);
-    let _ = m2;
     let c = ang.cos();
     let s = ang.sin();
-    let kv = cross(k, m1);
-    let kd = dot(k, m1);
-    let r = [
-        m1[0] * c + kv[0] * s + k[0] * kd * (1.0 - c),
-        m1[1] * c + kv[1] * s + k[1] * kd * (1.0 - c),
-        m1[2] * c + kv[2] * s + k[2] * kd * (1.0 - c),
-    ];
-    normalize(r).unwrap_or(m1)
+    let kv = cross(k, v);
+    let kd = dot(k, v);
+    normalize([
+        v[0] * c + kv[0] * s + k[0] * kd * (1.0 - c),
+        v[1] * c + kv[1] * s + k[1] * kd * (1.0 - c),
+        v[2] * c + kv[2] * s + k[2] * kd * (1.0 - c),
+    ])
+    .unwrap_or(v)
+}
+
+fn dist2(a: Point3, b: Point3) -> f64 {
+    let d = sub(a, b);
+    dot(d, d)
 }
 
 fn dedup(ring: Vec<u32>) -> Vec<u32> {
-    let mut out: Vec<u32> = Vec::with_capacity(ring.len());
+    let mut o: Vec<u32> = Vec::with_capacity(ring.len());
     for v in ring {
-        if out.last() != Some(&v) {
-            out.push(v);
+        if o.last() != Some(&v) {
+            o.push(v);
         }
     }
-    while out.len() > 1 && out.first() == out.last() {
-        out.pop();
+    while o.len() > 1 && o.first() == o.last() {
+        o.pop();
     }
-    out
+    o
 }
 
 fn face_normal(solid: &Solid, fi: usize) -> Vector3 {
