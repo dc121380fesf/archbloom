@@ -3,3 +3,7 @@
 _build/
 *.pdb
 node_modules/
+# example 运行产物（不入库）
+*.step
+*.stl
+*.STEP
