@@ -423,8 +423,27 @@ pub fn fillet_solid(
                 put!(q)
             })
             .collect();
-        let ring = dedup(ring);
+        let mut ring = dedup(ring);
         if ring.len() >= 3 {
+            // 朝向必须「远离球心」：这三个端点围出的是角落处的球面片，
+            // 朝外就是背离球心的方向。
+            //
+            // 不判的话按顶点顺序算出的是 (-1,-1,-1)/√3——指向实体内部，
+            // 三角化时体积会被多减一遍（实测全边 5.44 而理论 7.80）。
+            let centroid = {
+                let mut s = [0.0; 3];
+                for &i in &ring {
+                    let p = out.verts[i as usize];
+                    for k in 0..3 {
+                        s[k] += p[k];
+                    }
+                }
+                let m = ring.len() as f64;
+                [s[0] / m, s[1] / m, s[2] / m]
+            };
+            if dot(plane_normal(&out, &ring), sub(centroid, *c)) < 0.0 {
+                ring.reverse();
+            }
             let nrm = plane_normal(&out, &ring);
             out.faces.push(Face {
                 surface: Surface::Plane {
