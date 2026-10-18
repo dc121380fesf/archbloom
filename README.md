@@ -8,7 +8,7 @@
 
 <p align="center">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-core-orange">
-  <img alt="tests" src="https://img.shields.io/badge/tests-252%20green">
+  <img alt="tests" src="https://img.shields.io/badge/tests-254%20green">
   <img alt="clippy" src="https://img.shields.io/badge/clippy-0%20warnings-blue">
   <img alt="license" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue">
 </p>
@@ -81,7 +81,7 @@ archbloom-run my_scene.json
 
 ## 工程质量
 
-- **252 测试全绿 / clippy 0 警告**；独立代码审计 15/15 清偿（含敌对输入面负例网）
+- **254 测试全绿 / clippy 0 警告**；独立代码审计 15/15 清偿（含敌对输入面负例网）
 - 确定性渲染轨（CPU）+ 速度轨（GPU）双轨制；稳定 ID 不复用、双哈希事实面、事务进出
 - 自研核心：IR 场景格式、半边拓扑、路径追踪器、WebGL2 查看器、STEP P21 解析器
 
