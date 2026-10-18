@@ -57,6 +57,15 @@ fn ear_clip(poly: &[P2]) -> Vec<[usize; 3]> {
         out.push([0, 1, 2]);
         return out;
     }
+    // 阈值必须跟多边形尺度走。写死 1e-16 对 0.02 量级的投影坐标来说太松，
+    // 桥接缝附近的退化耳剪不掉，剩下的块被兜底扇形展开时产生翻转三角形。
+    let scale = poly
+        .iter()
+        .map(|p| p[0].abs().max(p[1].abs()))
+        .fold(0.0_f64, f64::max)
+        .max(1e-9);
+    let eps = scale * scale * 1e-10;
+
     let mut idx: Vec<usize> = (0..n).collect();
     let mut guard = 0usize;
     while idx.len() > 3 && guard < n * n + 4 {
@@ -68,7 +77,7 @@ fn ear_clip(poly: &[P2]) -> Vec<[usize; 3]> {
             let ib = idx[i];
             let ic = idx[(i + 1) % m];
             let (a, b, c) = (poly[ia], poly[ib], poly[ic]);
-            if cross2(a, b, c) <= 1e-16 {
+            if cross2(a, b, c) <= eps {
                 continue; // 凹点或退化
             }
             let mut clean = true;
@@ -76,7 +85,21 @@ fn ear_clip(poly: &[P2]) -> Vec<[usize; 3]> {
                 if j == ia || j == ib || j == ic {
                     continue;
                 }
-                if point_in_tri(poly[j], a, b, c) {
+                // 坐标与三角形任一顶点重合的点不算遮挡。
+                //
+                // 桥接缝里 anchor 会出现两次（两个不同索引、同一坐标），
+                // 洞上相邻点在极瘦三角形里也几乎共线——`point_in_tri`
+                // 对「全 0」情形返回 true（视为边界上），于是洞点互相
+                // “占位”，所有耳都被拒（实测 guard=1 就卡住）。
+                let pj = poly[j];
+                let dup = [ia, ib, ic].iter().any(|&k| {
+                    let q = poly[k];
+                    (pj[0] - q[0]).abs() <= eps && (pj[1] - q[1]).abs() <= eps
+                });
+                if dup {
+                    continue;
+                }
+                if point_in_tri(pj, a, b, c) {
                     clean = false;
                     break;
                 }
@@ -96,9 +119,15 @@ fn ear_clip(poly: &[P2]) -> Vec<[usize; 3]> {
     if idx.len() == 3 {
         out.push([idx[0], idx[1], idx[2]]);
     } else if idx.len() > 3 {
-        // 兜底：剩余部分扇形展开，保证不丢面积
+        // 兜底：**不能盲目扇形展开**。剩余块多半是凹的，扇出的三角形会翻转，
+        // 有向面积被抵消（实测 195 个三角形里 43 个翻转，体积偏 1.4 mm³）。
+        // 逐三角形校正方向：负面积的交换两个顶点。
         for i in 1..idx.len() - 1 {
-            out.push([idx[0], idx[i], idx[i + 1]]);
+            let mut tri = [idx[0], idx[i], idx[i + 1]];
+            if cross2(poly[tri[0]], poly[tri[1]], poly[tri[2]]) < 0.0 {
+                tri.swap(1, 2);
+            }
+            out.push(tri);
         }
     }
     out
@@ -106,34 +135,113 @@ fn ear_clip(poly: &[P2]) -> Vec<[usize; 3]> {
 
 /// 把洞挂到外环上，多环变单环。
 ///
+/// # 为什么不能只挑最近点
+///
+/// 老实现只找「距离最近的洞点 / 外环点」就下桥。但桥接线可能**穿过别的边**——
+/// 自交之后耳切必然卡住，剩下的块被兜底扇形展开，三角形覆盖到洞里，
+/// 有向面积算出来比外框还大（实测 0.000513 m² vs 理论 0.000322 m²）。
+///
+/// # 现在的做法
+///
+/// 射线法（和 earcut 的 eliminateHole 同思路）：
+/// 1. 取洞的**最右点** h（x 最大）
+/// 2. 从 h 向右发射线，找外环上**最近**的跨越边
+/// 3. 桥接到那条边的**右端点**
+///
+/// 因为射线只在 h 的右侧扫，落点必然在洞外，桥接线也不可能穿过洞本身。
+///
 /// 返回的环里，桥接处有相邻重复点（缝），耳切时按退化跳过。
 fn bridge(outer: &[P2], holes: &[Vec<P2>]) -> Vec<usize> {
     let mut ring: Vec<usize> = (0..outer.len()).collect();
     let mut all: Vec<P2> = outer.to_vec();
+
     for h in holes {
+        if h.len() < 3 {
+            continue;
+        }
         let base = all.len();
         all.extend_from_slice(h);
         let hidx: Vec<usize> = (base..base + h.len()).collect();
 
-        let mut best = (f64::MAX, 0usize, 0usize);
-        for (ri, &oi) in ring.iter().enumerate() {
-            for (hi, &hii) in hidx.iter().enumerate() {
-                let a = all[oi];
-                let b = all[hii];
-                let d = (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2);
-                if d < best.0 {
-                    best = (d, ri, hi);
-                }
+        // 1. 洞的最右点
+        let mut best_hi = 0usize;
+        for (k, &i) in hidx.iter().enumerate() {
+            let p = all[i];
+            let q = all[hidx[best_hi]];
+            if p[0] > q[0] + 1e-18 || (p[0] - q[0]).abs() <= 1e-18 && p[1] < q[1] {
+                best_hi = k;
             }
         }
-        let (_, ri, hi) = best;
-        let mut inset: Vec<usize> = Vec::with_capacity(hidx.len() + 2);
-        inset.push(ring[ri]);
-        for k in 0..hidx.len() {
-            inset.push(hidx[(hi + k) % hidx.len()]);
+        let hp = all[hidx[best_hi]];
+
+        // 2. 向右射线，找最近跨越边
+        let mut hit: Option<(f64, usize)> = None; // (交点 x, ring 中边的起点下标)
+        for ri in 0..ring.len() {
+            let oi = ring[ri];
+            let oj = ring[(ri + 1) % ring.len()];
+            let a = all[oi];
+            let b = all[oj];
+            // 边的两个端点必须分居射线两侧（严格）
+            let above_a = a[1] > hp[1];
+            let above_b = b[1] > hp[1];
+            if above_a == above_b {
+                continue;
+            }
+            let dy = b[1] - a[1];
+            if dy.abs() < 1e-18 {
+                continue;
+            }
+            let t = (hp[1] - a[1]) / dy;
+            if !(0.0..=1.0).contains(&t) {
+                continue;
+            }
+            let x = a[0] + t * (b[0] - a[0]);
+            if x < hp[0] {
+                continue; // 交点在洞的左边，不要
+            }
+            if hit.is_none_or(|(bx, _)| x < bx) {
+                hit = Some((x, ri));
+            }
         }
-        inset.push(ring[ri]);
-        ring.splice(ri + 1..ri + 1, inset);
+
+        // 3. 桥接到那条边的右端点；找不到就退回最近点对（保底）
+        let anchor = match hit {
+            Some((_, ri)) => {
+                let oi = ring[ri];
+                let oj = ring[(ri + 1) % ring.len()];
+                if all[oi][0] >= all[oj][0] {
+                    ri
+                } else {
+                    (ri + 1) % ring.len()
+                }
+            }
+            None => {
+                let mut best = (f64::MAX, 0usize);
+                for (ri, &oi) in ring.iter().enumerate() {
+                    for &hii in &hidx {
+                        let a = all[oi];
+                        let b = all[hii];
+                        let d = (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2);
+                        if d < best.0 {
+                            best = (d, ri);
+                        }
+                    }
+                }
+                best.1
+            }
+        };
+
+        // 桥接：ring[anchor] → 洞全程 → ring[anchor]
+        //
+        // inset 里**不能再包含 anchor 本身**。anchor 已经在环上，
+        // 写成 [anchor, 洞…, anchor] 会让环里出现 3 个 anchor，
+        // 耳切第一轮就全部被 point_in_tri 拒掉（guard=1 就卡住）。
+        let mut inset: Vec<usize> = Vec::with_capacity(hidx.len() + 1);
+        for k in 0..hidx.len() {
+            inset.push(hidx[(best_hi + k) % hidx.len()]);
+        }
+        inset.push(ring[anchor]);
+        ring.splice(anchor + 1..anchor + 1, inset);
     }
     ring
 }

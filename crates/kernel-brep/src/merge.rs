@@ -49,7 +49,37 @@ pub struct MergeStats {
 }
 
 /// 把同一解析曲面上相邻的面片合并成整面。返回新实体与统计。
+///
+/// 现在走后端：`merge_by_half_edge`（半边拼接）。
+/// 它沿共享边只改 `next` 指针，不做几何计算，也不会把洞划错。
+/// 旧实现保留为 [`merge_coplanar_legacy`]，出错时回退。
 pub fn merge_coplanar(solid: &Solid) -> Result<(Solid, MergeStats), KernelError> {
+    let n = solid.faces.len();
+    if n == 0 {
+        return Ok((solid.clone(), MergeStats::default()));
+    }
+    match crate::merge_he::merge_by_half_edge(solid, 1.0) {
+        Ok((out, _)) => {
+            let after = out.faces.len();
+            let holed = out.faces.iter().filter(|f| !f.holes.is_empty()).count();
+            let stats = MergeStats {
+                faces_before: n,
+                faces_after: after,
+                holed_faces: holed,
+                reduction: (n - after) as f64 / n as f64,
+            };
+            Ok((out, stats))
+        }
+        Err(_) => merge_coplanar_legacy(solid),
+    }
+}
+
+/// 旧实现：几何数组拼接 + 面积猜洞。
+///
+/// 保留它是因为它在某些退化输入上比半边路径宽容（不要求拓扑完全健康）。
+/// 新代码请用 [`merge_coplanar`]。
+#[allow(dead_code)]
+pub fn merge_coplanar_legacy(solid: &Solid) -> Result<(Solid, MergeStats), KernelError> {
     let n = solid.faces.len();
     if n == 0 {
         return Ok((solid.clone(), MergeStats::default()));

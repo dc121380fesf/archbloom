@@ -231,6 +231,70 @@ fn split_rings(seq: &[u32]) -> Vec<Vec<u32>> {
     out
 }
 
+/// 去掉环上的共线点（不改变几何）。
+///
+/// 面片合并后会留下大量共线点：外环 132 点里绝大多数落在同一条直边上
+/// （实测 x 全等于 0.02）。耳切遇到这些点 `cross = 0`，既不是凸点也不是凹点，
+/// 全部跳过 → 耳切卡死 → 强制扇形展开 → 三角形覆盖到洞里，
+/// 有向面积 0.00056 vs 理论 0.000322。
+///
+/// 这里按「点到直线距离 < 容差」剔除，回去后外环只剥 4 个角点。
+fn simplify_collinear(s: &Solid, ring: &[u32], normal: Vector3) -> Vec<u32> {
+    if ring.len() <= 3 {
+        return ring.to_vec();
+    }
+    let scale = ring
+        .iter()
+        .flat_map(|&i| {
+            let p = s.verts[i as usize];
+            [p[0].abs(), p[1].abs(), p[2].abs()]
+        })
+        .fold(0.0_f64, f64::max)
+        .max(1e-9);
+    let eps = scale * 1e-9;
+
+    let mut out: Vec<u32> = ring.to_vec();
+    let mut changed = true;
+    while changed && out.len() > 3 {
+        changed = false;
+        let m = out.len();
+        for i in 0..m {
+            let ia = out[(i + m - 1) % m];
+            let ib = out[i];
+            let ic = out[(i + 1) % m];
+            let a = s.verts[ia as usize];
+            let b = s.verts[ib as usize];
+            let c = s.verts[ic as usize];
+            let ac = sub(c, a);
+            let ab = sub(b, a);
+            // b 到 ac 的距离（体积 = |ab × ac| / |ac|）
+            let cr = [
+                ab[1] * ac[2] - ab[2] * ac[1],
+                ab[2] * ac[0] - ab[0] * ac[2],
+                ab[0] * ac[1] - ab[1] * ac[0],
+            ];
+            let crl = (cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]).sqrt();
+            let acl = dot(ac, ac).sqrt();
+            if acl < 1e-15 {
+                out.remove(i);
+                changed = true;
+                break;
+            }
+            if crl / acl < eps {
+                // 再确认 b 在 a、c 之间（不是延长线外侧）
+                let t = dot(ab, ac) / dot(ac, ac);
+                if (-1e-9..=1.0 + 1e-9).contains(&t) {
+                    out.remove(i);
+                    changed = true;
+                    break;
+                }
+            }
+        }
+    }
+    let _ = normal;
+    out
+}
+
 /// 从半边链重建面表（含洞的切分）。
 fn rebuild_faces(s: &Solid) -> Vec<Face> {
     let mut visited: HashSet<usize> = HashSet::new();
@@ -263,21 +327,31 @@ fn rebuild_faces(s: &Solid) -> Vec<Face> {
         if rings.is_empty() {
             continue;
         }
-        // 面积最大的当外环
         let normal = s.faces[fi]
             .surface
             .normal_at(s.verts[rings[0][0] as usize])
             .unwrap_or([0.0, 0.0, 1.0]);
+        // 面积最大的当外环。
+        //
+        // **必须比绝对值**：底面法线朝下，外环的有符号面积是负的（-400），
+        // 洞反而是正的（+78）。按有符号降序排，会把洞当成外环，
+        // 结果底面面积算成 -478（洞被“加”而不是减）。
         rings.sort_by(|a, b| {
-            ring_area(s, b, normal)
-                .partial_cmp(&ring_area(s, a, normal))
+            let aa = ring_area(s, a, normal).abs();
+            let bb = ring_area(s, b, normal).abs();
+            bb.partial_cmp(&aa)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let outer = rings.remove(0);
+        let outer = simplify_collinear(s, &rings.remove(0), normal);
+        let holes: Vec<Vec<u32>> = rings
+            .into_iter()
+            .map(|r| simplify_collinear(s, &r, normal))
+            .filter(|r| r.len() >= 3)
+            .collect();
         out.push(Face {
             surface: s.faces[fi].surface,
             verts: outer,
-            holes: rings,
+            holes,
         });
     }
     out
