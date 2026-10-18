@@ -100,6 +100,15 @@ pub fn to_step_curved(solid: &Solid, name: &str) -> String {
 }
 
 fn to_step_impl(solid: &Solid, name: &str, use_cylinders: bool) -> String {
+    // ── 曲面路径的安全护栏 ──
+    //
+    // 曲面上的边必须是曲线。如果实体里有「带洞面」，而洞又不是圆
+    // （合并产出的 47 个碎片洞就是这样），孔口边界就没法写成圆边，
+    // 壳会不闭合、体积也算错。
+    //
+    // 这种情况下**整份退回全平面**，宁交已知正确的多面体，
+    // 也不交一份“看起来有曲面但几何错”的文件。
+    let use_cylinders = use_cylinders && holes_are_all_round(solid);
     let mut w = P21::new();
 
     // ── 产品/上下文骨架（STEP 要求的最小链）──
@@ -250,6 +259,10 @@ fn to_step_impl(solid: &Solid, name: &str, use_cylinders: bool) -> String {
             if let Some((c_center, c_radius)) = det {
                 let key = circle_key(c_center, normal, c_radius);
                 if let Some(edge) = circle_edges.get(&key) {
+                    // 这个平面可能是「外环 + 圆洞」（开孔板的顶/底面）。
+                    // 外环是折线没关系，但**洞必须是圆边**——否则它和孔壁曲面的圆边对不上，
+                    // 壳在孔口处断成两半（实测体积 2131 vs 理论 1607、闭合 False）。
+                    let mut bounds: Vec<String> = Vec::new();
                     let plane_origin =
                         w.add(&format!("CARTESIAN_POINT('',{})", pt(verts[0])));
                     let p_axis = w.add(&format!("DIRECTION('',{})", pt(normal)));
@@ -258,11 +271,26 @@ fn to_step_impl(solid: &Solid, name: &str, use_cylinders: bool) -> String {
                         "AXIS2_PLACEMENT_3D('',{plane_origin},{p_axis},{p_ref})"
                     ));
                     let p_surf = w.add(&format!("PLANE('',{p_pl})"));
-                    let oe = w.add(&format!("ORIENTED_EDGE('',*,*,{edge},.T.)"));
-                    let lid = w.add(&format!("EDGE_LOOP('',({oe}))"));
-                    let bnd = w.add(&format!("FACE_BOUND('',{lid},.T.)"));
+
+                    // 外环：用缓存的圆边
+                    {
+                        let oe = w.add(&format!("ORIENTED_EDGE('',*,*,{edge},.T.)"));
+                        let lid = w.add(&format!("EDGE_LOOP('',({oe}))"));
+                        bounds.push(w.add(&format!("FACE_OUTER_BOUND('',{lid},.T.)")));
+                    }
+                    // 内环（洞）：如果也是圆，用缓存的圆边
+                    for hole in &f.holes {
+                        if let Some((hc, hr)) = detect_circle(solid, hole, normal) {
+                            if let Some(hedge) = circle_edges.get(&circle_key(hc, normal, hr)) {
+                                let oe = w.add(&format!("ORIENTED_EDGE('',*,*,{hedge},.F.)"));
+                                let lid = w.add(&format!("EDGE_LOOP('',({oe}))"));
+                                bounds.push(w.add(&format!("FACE_BOUND('',{lid},.T.)")));
+                            }
+                        }
+                    }
                     face_refs.push(w.add(&format!(
-                        "ADVANCED_FACE('',({bnd}),{p_surf},.T.)"
+                        "ADVANCED_FACE('',({}),{p_surf},.T.)",
+                        P21::ref_list(&bounds)
                     )));
                     continue;
                 }
@@ -562,6 +590,25 @@ fn circle_edge(
         "EDGE_CURVE('',{v},{v},{circle},.T.)",
         v = vertex_ref
     ))
+}
+
+/// 所有带洞面的洞都必须是圆，曲面路径才可用。
+fn holes_are_all_round(solid: &Solid) -> bool {
+    for f in &solid.faces {
+        if f.holes.is_empty() {
+            continue;
+        }
+        let normal = f
+            .surface
+            .normal_at(solid.verts[f.verts[0] as usize])
+            .unwrap_or([0.0, 0.0, 1.0]);
+        for h in &f.holes {
+            if detect_circle(solid, h, normal).is_none() {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// 检测一个环是不是圆：所有顶点到质心距离一致 → 返回 (圆心, 半径)。

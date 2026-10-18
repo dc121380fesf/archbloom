@@ -14,7 +14,7 @@
 use archcore_kernel::{KernelError, Point3};
 
 use crate::bsp::Polygon;
-use crate::geom::{dot, len, sub, Surface};
+use crate::geom::{dot, len, sub};
 use crate::solid::{Face, Solid};
 
 /// 顶点合并容差（米）。
@@ -145,10 +145,10 @@ pub fn polygons_to_solid(polys: &[Polygon]) -> Result<Solid, KernelError> {
             continue;
         }
         faces.push(Face {
-            surface: Surface::Plane {
-                origin: p.verts[0],
-                normal: p.plane.normal,
-            },
+            // **用多边形自带的曲面标注**，不再无条件写 Plane。
+            // 这一行以前是 `Surface::Plane { origin: p.verts[0], ... }`，
+            // 后果是布尔一跑，圆柱面的身份就全丢了（开孔板 169 面全成 plane）。
+            surface: p.surface,
             verts: ring,
             holes: Vec::new(),
         });
@@ -214,7 +214,8 @@ pub fn solid_to_polygons(s: &Solid) -> Vec<Polygon> {
             .iter()
             .filter_map(|i| s.verts.get(*i as usize).copied())
             .collect();
-        if let Some(p) = Polygon::new(verts) {
+        // 带着曲面标注进布尔链，否则圆柱会在重建后退成平面
+        if let Some(p) = Polygon::with_surface(verts, f.surface) {
             out.push(p);
         }
     }

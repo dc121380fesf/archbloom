@@ -26,7 +26,7 @@
 
 use archcore_kernel::{Point3, Vector3};
 
-use crate::geom::{add, cross, dot, len, normalize, scale, sub};
+use crate::geom::{add, cross, dot, len, normalize, scale, sub, Surface};
 
 /// 距离容差（米）。小于它的距离视为 0。
 pub const EPS: f64 = 1e-9;
@@ -82,12 +82,36 @@ impl Plane {
 pub struct Polygon {
     pub verts: Vec<Point3>,
     pub plane: Plane,
+    /// 这个多边形所属的**解析曲面**。
+    ///
+    /// 布尔切分时子多边形继承它，重建时再用它当面的标注。
+    /// 早先没有这个字段，布尔一跑就把圆柱面的身份退成 `Plane` ——
+    /// 实测开孔板 169 个面全是 plane，真曲面导出变成了“只对没做过布尔的圆柱生效”。
+    pub surface: Surface,
 }
 
 impl Polygon {
     pub fn new(verts: Vec<Point3>) -> Option<Self> {
         let plane = Plane::from_polygon(&verts)?;
-        Some(Self { verts, plane })
+        let surface = Surface::Plane {
+            origin: verts[0],
+            normal: plane.normal,
+        };
+        Some(Self {
+            verts,
+            plane,
+            surface,
+        })
+    }
+
+    /// 带曲面标注构造（布尔链里传递原始曲面用）。
+    pub fn with_surface(verts: Vec<Point3>, surface: Surface) -> Option<Self> {
+        let plane = Plane::from_polygon(&verts)?;
+        Some(Self {
+            verts,
+            plane,
+            surface,
+        })
     }
 
     pub fn flip(&mut self) {
@@ -207,12 +231,13 @@ pub(crate) fn split_polygon(
                 }
             }
             if f.len() >= 3 {
-                if let Some(p) = Polygon::new(f) {
+                // 子多边形**继承父面的曲面标注**，否则布尔一跑圆柱就退成平面
+                if let Some(p) = Polygon::with_surface(f, poly.surface) {
                     front.push(p);
                 }
             }
             if b.len() >= 3 {
-                if let Some(p) = Polygon::new(b) {
+                if let Some(p) = Polygon::with_surface(b, poly.surface) {
                     back.push(p);
                 }
             }
