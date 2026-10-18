@@ -59,4 +59,4 @@ pub use solid::{
     box_solid, cylinder_solid, segments_for_tolerance, volume_from_mesh, Face, Solid,
 };
 pub use stl::{to_stl_ascii, verify_against_solid};
-pub use step::{to_step, verify_against_solid as verify_step_against_solid};
+pub use step::{to_step, to_step_curved, verify_against_solid as verify_step_against_solid};

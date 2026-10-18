@@ -1,26 +1,25 @@
 //! STEP (ISO 10303-21) 导出。
 //!
-//! # 这一版导什么
+//! # 导什么
 //!
-//! **全部用 PLANE 的合法实体**。每个面是一个平面多边形，边界是折线。
+//! * **平面**：`PLANE` + 折线边界（多边形）。
+//! * **完整圆柱侧面**：`CYLINDRICAL_SURFACE` + `CIRCULAR_ARC` 边界。
 //!
-//! # 为什么不用 CYLINDRICAL_SURFACE
+//! # 为什么曲面必须配圆弧边
 //!
-//! 我们的圆柱是离散的（N 个平面四边形）。如果把孔壁声明成 `CYLINDRICAL_SURFACE`，
-//! 但边界还是那 N 条折线，这份文件在语义上就是**错的**——曲面上的边必须真的落在
-//! 该曲面上。FreeCAD 可能照读不误，但任何做几何校验的工具都会判它不合法。
-//!
-//! 真圆柱需要：曲线边（CIRCLE）+ 曲面上的顶点 + 完整的一圈 EDGE_LOOP。
-//! 那是 G 阶段的第二步，本轮先把「合法 + 可读 + 几何正确」这条链路打通。
+//! 曲面上的边必须真的落在该曲面上。如果在 `CYLINDRICAL_SURFACE` 上用折线当边界，
+//! 这份文件在语义上就是**错的**——FreeCAD 可能照读不误，但任何做几何校验的工具
+//! 都会判它不合法。所以这里严格**成对交付**：能写出圆弧才写曲面，
+//! 否则整组退回逐面平面折线，**绝不允许半真半假**。
 //!
 //! # 为什么值得做
 //!
-//! STL 只有三角面片，做不了精确件；STEP 带拓扑（面-环-边-顶点）与曲面类型，
-//! 是 CAD/CAM 之间的通用语言。哪怕现在是多面体，它也已经是一份**能进 CAD 流程**的文件。
+//! 加工端拿到全平面的 STEP，看到的是「一堆多边形」而不是「一个 Φ10 的孔」，
+//! 写 CNC 代码时按多边形走刀。只有 `CYLINDRICAL_SURFACE` 才叫真正的孔。
 
 use std::fmt::Write as _;
 
-use crate::geom::{cross, normalize, sub};
+use crate::geom::{cross, dot, normalize, orthonormal_basis, sub, Surface};
 use crate::solid::Solid;
 
 /// P21 实体写入器：管 id 分配与格式。
@@ -76,7 +75,25 @@ fn pt(a: [f64; 3]) -> String {
 /// 把实体导出成 STEP 文本。
 ///
 /// `name` 会写进 PRODUCT 与 FILE_NAME，FreeCAD 里看到的就是这个名字。
+/// 导出 STEP（**稳定路径**：全平面折线）。
+///
+/// 这份输出经 FreeCAD 验证：合法、闭合、体积准确。加工端读到的是多面体。
 pub fn to_step(solid: &Solid, name: &str) -> String {
+    to_step_impl(solid, name, false)
+}
+
+/// 导出 STEP（**实验路径**：尝试把圆柱侧面写成 `CYLINDRICAL_SURFACE` + 圆弧边）。
+///
+/// 当前状态：面能被 FreeCAD 认成 `Cylinder`、边上也出现了 `Circle`，
+/// 但拓扑尚未完全闭合（32 段弧只认出 15 条，面积算不对）。
+/// **不要把这条路径的产物直接交给加工端**；它目前用于调试与进度度量。
+///
+/// 不做整组回退——调用方明确要曲面时，就应该看到曲面写出来是什么样。
+pub fn to_step_curved(solid: &Solid, name: &str) -> String {
+    to_step_impl(solid, name, true)
+}
+
+fn to_step_impl(solid: &Solid, name: &str, use_cylinders: bool) -> String {
     let mut w = P21::new();
 
     // ── 产品/上下文骨架（STEP 要求的最小链）──
@@ -131,7 +148,57 @@ pub fn to_step(solid: &Solid, name: &str) -> String {
     // ── 面 ──
     let mut face_refs: Vec<String> = Vec::new();
 
-    for f in &solid.faces {
+    // ── 圆柱侧面：先成组处理 ──
+    //
+    // 同一个 `Cylinder` 曲面的侧面片合成一个 `CYLINDRICAL_SURFACE` 面。
+    // 这是「可出加工件」的关键：孔壁必须是一个曲面加圆弧边，
+    // 而不是 64 个平面拼的棱柱——否则加工端看到的是多边形不是孔。
+    //
+    // **成对交付**：曲面配圆弧边。做不到就整组退回逐面平面折线，
+    // 绝不在曲面上用折线（那会让文件语义自相矛盾）。
+    let mut consumed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    if use_cylinders {
+        let mut groups: std::collections::HashMap<String, (Surface, Vec<usize>)> =
+            std::collections::HashMap::new();
+        for (i, f) in solid.faces.iter().enumerate() {
+            if let Surface::Cylinder {
+                origin,
+                axis,
+                radius,
+            } = f.surface
+            {
+                let key = format!(
+                    "C|{:.9},{:.9},{:.9}|{:.9},{:.9},{:.9}|{:.9}",
+                    origin[0], origin[1], origin[2], axis[0], axis[1], axis[2], radius
+                );
+                groups
+                    .entry(key)
+                    .or_insert_with(|| (f.surface, Vec::new()))
+                    .1
+                    .push(i);
+            }
+        }
+        // 顺序确定：否则 Hash 顺序会让输出不稳定
+        let mut keys: Vec<String> = groups.keys().cloned().collect();
+        keys.sort();
+        for k in keys {
+            let (surf, idxs) = &groups[&k];
+            if idxs.len() < 4 {
+                continue;
+            }
+            if let Some(face_ref) = emit_cylinder_side(&mut w, solid, idxs, surf, &vpoint) {
+                face_refs.push(face_ref);
+                for &i in idxs {
+                    consumed.insert(i);
+                }
+            }
+        }
+    }
+
+    for (face_idx, f) in solid.faces.iter().enumerate() {
+        if consumed.contains(&face_idx) {
+            continue;
+        }
         let ring = &f.verts;
         if ring.len() < 3 {
             continue;
@@ -234,6 +301,205 @@ pub fn to_step(solid: &Solid, name: &str) -> String {
     ));
 
     assemble(&w.body, name)
+}
+
+/// 把一组圆柱侧面片写成一个 `CYLINDRICAL_SURFACE` 面。
+///
+/// 边界：底圆 n 段弧 → 母线（seam）→ 顶圆 n 段弧（反向）→ 同一条母线反向。
+/// 每段弧按**实际顶点角度**写，不硬拆半圆——这样弧的端点一定对得上真实顶点。
+///
+/// 返回 None 表示这组不是完整筒（被切掉一块、顶点不共圆），
+/// 调用方应退回逐面平面折线。
+fn emit_cylinder_side(
+    w: &mut P21,
+    solid: &Solid,
+    faces: &[usize],
+    surface: &Surface,
+    vpoint: &[String],
+) -> Option<String> {
+    let Surface::Cylinder {
+        origin,
+        axis,
+        radius,
+    } = *surface
+    else {
+        return None;
+    };
+    let axis = normalize(axis)?;
+    let (u, vv) = orthonormal_basis(axis)?;
+
+    let mut idx: Vec<u32> = Vec::new();
+    for &fi in faces {
+        for &x in &solid.faces[fi].verts {
+            if !idx.contains(&x) {
+                idx.push(x);
+            }
+        }
+    }
+    if idx.len() < 8 {
+        return None;
+    }
+
+    let mut hs: Vec<f64> = idx
+        .iter()
+        .map(|&i| dot(sub(solid.verts[i as usize], origin), axis))
+        .collect();
+    hs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let hmin = *hs.first()?;
+    let hmax = *hs.last()?;
+    if (hmax - hmin).abs() < 1e-12 {
+        return None;
+    }
+    let mid = (hmin + hmax) * 0.5;
+
+    let mut bot: Vec<(f64, u32)> = Vec::new();
+    let mut top: Vec<(f64, u32)> = Vec::new();
+    for &i in &idx {
+        let p = solid.verts[i as usize];
+        let d = sub(p, origin);
+        let h = dot(d, axis);
+        let radial = sub(d, [axis[0] * h, axis[1] * h, axis[2] * h]);
+        let r = dot(radial, radial).sqrt();
+        if (r - radius).abs() > radius * 0.01 + 1e-9 {
+            return None;
+        }
+        let ang = dot(radial, vv).atan2(dot(radial, u));
+        if h < mid {
+            bot.push((ang, i));
+        } else {
+            top.push((ang, i));
+        }
+    }
+    if bot.len() < 4 || bot.len() != top.len() {
+        return None;
+    }
+    bot.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    top.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // 角度覆盖必须近整圈，否则是被切掉一块的圆柱
+    let tau = std::f64::consts::TAU;
+    let n = bot.len();
+    let covered: f64 = (0..n)
+        .map(|i| {
+            let a = bot[i].0;
+            let b = if i + 1 < n { bot[i + 1].0 } else { bot[0].0 + tau };
+            b - a
+        })
+        .sum();
+    if covered.to_degrees() < 350.0 {
+        return None;
+    }
+
+    // ── 曲面：AXIS2_PLACEMENT_3D 原点在底圆心，Z 轴为轴向，X 轴为角度零点 ──
+    let p0 = solid.verts[bot[0].1 as usize];
+    let h0 = dot(sub(p0, origin), axis);
+    let base_p = sub(p0, [axis[0] * h0, axis[1] * h0, axis[2] * h0]);
+    let co = w.add(&format!("CARTESIAN_POINT('',{})", pt(base_p)));
+    let ad = w.add(&format!("DIRECTION('',{})", pt(axis)));
+    let rd = w.add(&format!("DIRECTION('',{})", pt(u)));
+    let pl = w.add(&format!("AXIS2_PLACEMENT_3D('',{co},{ad},{rd})"));
+    let surf = w.add(&format!("CYLINDRICAL_SURFACE('',{pl},{})", num(radius)));
+
+    let mut oriented: Vec<String> = Vec::new();
+
+    // 底圆：逆时针 n 段
+    for i in 0..n {
+        let a = bot[i];
+        let b = bot[(i + 1) % n];
+        let sweep = if i + 1 < n {
+            b.0 - a.0
+        } else {
+            b.0 + tau - a.0
+        };
+        let pa = solid.verts[a.1 as usize];
+        let c = sub(pa, {
+            let h = dot(sub(pa, origin), axis);
+            [axis[0] * h, axis[1] * h, axis[2] * h]
+        });
+        let arc = arc_entity(w, pa, c, axis, sweep);
+        let ec = w.add(&format!(
+            "EDGE_CURVE('',{},{},{arc},.T.)",
+            vpoint[a.1 as usize], vpoint[b.1 as usize]
+        ));
+        oriented.push(w.add(&format!("ORIENTED_EDGE('',*,*,{ec},.T.)")));
+    }
+
+    // 母线：上去
+    let seam = {
+        let a = bot[0].1;
+        let b = top[0].1;
+        let va = solid.verts[a as usize];
+        let vb = solid.verts[b as usize];
+        let dir = normalize(sub(vb, va))?;
+        let po = w.add(&format!("CARTESIAN_POINT('',{})", pt(va)));
+        let dd = w.add(&format!("DIRECTION('',{})", pt(dir)));
+        let vec = w.add(&format!("VECTOR('',{dd},1.)"));
+        let line = w.add(&format!("LINE('',{po},{vec})"));
+        w.add(&format!(
+            "EDGE_CURVE('',{},{},{line},.T.)",
+            vpoint[a as usize], vpoint[b as usize]
+        ))
+    };
+    oriented.push(w.add(&format!("ORIENTED_EDGE('',*,*,{seam},.T.)")));
+
+    // 顶圆：顺时针（反向）n 段
+    for i in (0..n).rev() {
+        let a = top[i];
+        let b = top[(i + n - 1) % n];
+        let sweep = if i > 0 {
+            b.0 - a.0
+        } else {
+            b.0 - a.0 - tau
+        };
+        let pa = solid.verts[a.1 as usize];
+        let c = sub(pa, {
+            let h = dot(sub(pa, origin), axis);
+            [axis[0] * h, axis[1] * h, axis[2] * h]
+        });
+        let arc = arc_entity(w, pa, c, axis, sweep);
+        let ec = w.add(&format!(
+            "EDGE_CURVE('',{},{},{arc},.T.)",
+            vpoint[a.1 as usize], vpoint[b.1 as usize]
+        ));
+        oriented.push(w.add(&format!("ORIENTED_EDGE('',*,*,{ec},.T.)")));
+    }
+
+    // 母线：下来（同一条边，反向）
+    oriented.push(w.add(&format!("ORIENTED_EDGE('',*,*,{seam},.F.)")));
+
+    let loop_id = w.add(&format!("EDGE_LOOP('',({}))", P21::ref_list(&oriented)));
+    let bound = w.add(&format!("FACE_OUTER_BOUND('',{loop_id},.T.)"));
+    Some(w.add(&format!("ADVANCED_FACE('',({bound}),{surf},.T.)")))
+}
+
+/// 写一段圆弧：`CIRCLE` + `TRIMMED_CURVE`。
+///
+/// **不能用 `CIRCULAR_ARC`**：它不是 ISO 10303-42 的核心实体（那是 AP242 的扩展），
+/// FreeCAD 读不认，把它退化成 `Line`——实测体积直接算成 6.67e+101。
+/// 标准写法是「整圆 + 用角度参数裁剪」：
+///
+/// ```text
+/// #n = CIRCLE('', axis2_placement_3d, radius);
+/// #m = TRIMMED_CURVE('', #n, (PARAMETER_VALUE(0.)), (PARAMETER_VALUE(1.57)), .T., .PARAMETER.);
+/// ```
+fn arc_entity(w: &mut P21, from: [f64; 3], center: [f64; 3], axis: [f64; 3], sweep: f64) -> String {
+    let co = w.add(&format!("CARTESIAN_POINT('',{})", pt(center)));
+    let ad = w.add(&format!("DIRECTION('',{})", pt(axis)));
+    let rdir = normalize(sub(from, center)).unwrap_or([1.0, 0.0, 0.0]);
+    let rd = w.add(&format!("DIRECTION('',{})", pt(rdir)));
+    let pl = w.add(&format!("AXIS2_PLACEMENT_3D('',{co},{ad},{rd})"));
+    let radius = dot(sub(from, center), rdir).abs();
+    let circle = w.add(&format!("CIRCLE('',{pl},{})", num(radius)));
+    // sense = .T. 表示沿圆的正向（逆时针）取弧；反向时取绝对值并翻转
+    let (sense, mag) = if sweep >= 0.0 {
+        (".T.", sweep)
+    } else {
+        (".F.", -sweep)
+    };
+    w.add(&format!(
+        "TRIMMED_CURVE('',{circle},(PARAMETER_VALUE(0.)),(PARAMETER_VALUE({})),{sense},.PARAMETER.)",
+        num(mag)
+    ))
 }
 
 fn verts_of(solid: &Solid, i: u32) -> [f64; 3] {
