@@ -84,13 +84,20 @@ pub fn to_step(solid: &Solid, name: &str) -> String {
 
 /// 导出 STEP（**实验路径**：尝试把圆柱侧面写成 `CYLINDRICAL_SURFACE` + 圆弧边）。
 ///
-/// 当前状态：面能被 FreeCAD 认成 `Cylinder`、边上也出现了 `Circle`，
-/// 但拓扑尚未完全闭合（32 段弧只认出 15 条，面积算不对）。
-/// **不要把这条路径的产物直接交给加工端**；它目前用于调试与进度度量。
+/// # 当前状态：未完成，暂时等同稳定路径
 ///
-/// 不做整组回退——调用方明确要曲面时，就应该看到曲面写出来是什么样。
+/// 试过四种写法，得到四种不同结果（`Circle` 边 1 / 2 / 6 / 32 条不等），
+/// 其中一次 `isValid` 变 True 但体积仍错。说明对 STEP 圆弧边界的语义
+/// （`CIRCLE` 轴向、`TRIMMED_CURVE` 参数范围、seam 处理）还没吃透。
+///
+/// **继续碰运气没意义**。下一步应该：拿一份 OCC 生成的圆柱 STEP 作对照，
+/// 逐行对结构，而不是自己推参数。
+///
+/// 在此之前，这个入口直接返回全平面结果——**宁可输出已知正确的多面体，
+/// 也不输出一份“看起来有曲面但几何错”的文件**。
 pub fn to_step_curved(solid: &Solid, name: &str) -> String {
-    to_step_impl(solid, name, true)
+    let _ = true; // 保留分支结构，待 S2 完成后打开
+    to_step_impl(solid, name, false)
 }
 
 fn to_step_impl(solid: &Solid, name: &str, use_cylinders: bool) -> String {
@@ -402,27 +409,65 @@ fn emit_cylinder_side(
 
     let mut oriented: Vec<String> = Vec::new();
 
-    // 底圆：逆时针 n 段
-    for i in 0..n {
-        let a = bot[i];
-        let b = bot[(i + 1) % n];
-        let sweep = if i + 1 < n {
-            b.0 - a.0
-        } else {
-            b.0 + tau - a.0
-        };
-        let pa = solid.verts[a.1 as usize];
-        let c = sub(pa, {
-            let h = dot(sub(pa, origin), axis);
+    // 底/顶圆心（轴线上同高度）
+    let base_center = sub(
+        solid.verts[bot[0].1 as usize],
+        {
+            let h = dot(sub(solid.verts[bot[0].1 as usize], origin), axis);
             [axis[0] * h, axis[1] * h, axis[2] * h]
-        });
-        let arc = arc_entity(w, pa, c, axis, sweep);
-        let ec = w.add(&format!(
-            "EDGE_CURVE('',{},{},{arc},.T.)",
-            vpoint[a.1 as usize], vpoint[b.1 as usize]
-        ));
-        oriented.push(w.add(&format!("ORIENTED_EDGE('',*,*,{ec},.T.)")));
+        },
+    );
+    let top_center = sub(
+        solid.verts[top[0].1 as usize],
+        {
+            let h = dot(sub(solid.verts[top[0].1 as usize], origin), axis);
+            [axis[0] * h, axis[1] * h, axis[2] * h]
+        },
+    );
+
+    // 底圆：**两段半圆**（OCC 的标准写法），不用 32 段小弧。
+    //
+    // 小弧的问题：每条弧都有自己的 CIRCLE 实体，FreeCAD 把它们当互不相干的圆，
+    // 结果一条环被拆成两个面。半圆只有一个圆心方向，拓扑自然闭合。
+    //
+    // 前提：首末顶点必须正好在对面（180°）。16 段的圆柱满足（第 8 段）。
+    let half_angle_fn = |a: (f64, u32), b: (f64, u32)| -> f64 {
+        let mut d = b.0 - a.0;
+        while d < 0.0 {
+            d += tau;
+        }
+        d
+    };
+    let mut half_idx = None;
+    for i in 1..n {
+        let d = half_angle_fn(bot[0], bot[i]);
+        if (d - std::f64::consts::PI).abs() < 0.2 {
+            half_idx = Some(i);
+            break;
+        }
     }
+    let Some(h) = half_idx else {
+        // 找不到对面顶点（段数奇数）：退回逐面折线
+        return None;
+    };
+
+    // 底半圆 1: bot[0] → bot[h]
+    let a0 = bot[0];
+    let ah = bot[h];
+    let arc1 = arc_entity(w, solid.verts[a0.1 as usize], base_center, axis, radius, true);
+    let ec1 = w.add(&format!(
+        "EDGE_CURVE('',{},{},{arc1},.T.)",
+        vpoint[a0.1 as usize], vpoint[ah.1 as usize]
+    ));
+    oriented.push(w.add(&format!("ORIENTED_EDGE('',*,*,{ec1},.T.)")));
+
+    // 底半圆 2: bot[h] → bot[0]（从 a0 角度 +π 继续到 2π）
+    let arc2 = arc_entity(w, solid.verts[ah.1 as usize], base_center, axis, radius, true);
+    let ec2 = w.add(&format!(
+        "EDGE_CURVE('',{},{},{arc2},.T.)",
+        vpoint[ah.1 as usize], vpoint[a0.1 as usize]
+    ));
+    oriented.push(w.add(&format!("ORIENTED_EDGE('',*,*,{ec2},.T.)")));
 
     // 母线：上去
     let seam = {
@@ -442,27 +487,22 @@ fn emit_cylinder_side(
     };
     oriented.push(w.add(&format!("ORIENTED_EDGE('',*,*,{seam},.T.)")));
 
-    // 顶圆：顺时针（反向）n 段
-    for i in (0..n).rev() {
-        let a = top[i];
-        let b = top[(i + n - 1) % n];
-        let sweep = if i > 0 {
-            b.0 - a.0
-        } else {
-            b.0 - a.0 - tau
-        };
-        let pa = solid.verts[a.1 as usize];
-        let c = sub(pa, {
-            let h = dot(sub(pa, origin), axis);
-            [axis[0] * h, axis[1] * h, axis[2] * h]
-        });
-        let arc = arc_entity(w, pa, c, axis, sweep);
-        let ec = w.add(&format!(
-            "EDGE_CURVE('',{},{},{arc},.T.)",
-            vpoint[a.1 as usize], vpoint[b.1 as usize]
-        ));
-        oriented.push(w.add(&format!("ORIENTED_EDGE('',*,*,{ec},.T.)")));
-    }
+    // 顶圆：同样两段半圆，方向相反
+    let b0 = top[0];
+    let bh = top[h];
+    let t_arc1 = arc_entity(w, solid.verts[b0.1 as usize], top_center, axis, radius, true);
+    let tec1 = w.add(&format!(
+        "EDGE_CURVE('',{},{},{t_arc1},.T.)",
+        vpoint[b0.1 as usize], vpoint[bh.1 as usize]
+    ));
+    let t_arc2 = arc_entity(w, solid.verts[bh.1 as usize], top_center, axis, radius, true);
+    let tec2 = w.add(&format!(
+        "EDGE_CURVE('',{},{},{t_arc2},.T.)",
+        vpoint[bh.1 as usize], vpoint[b0.1 as usize]
+    ));
+    // 环里反向走：b0 ← bh ← b0
+    oriented.push(w.add(&format!("ORIENTED_EDGE('',*,*,{tec2},.F.)")));
+    oriented.push(w.add(&format!("ORIENTED_EDGE('',*,*,{tec1},.F.)")));
 
     // 母线：下来（同一条边，反向）
     oriented.push(w.add(&format!("ORIENTED_EDGE('',*,*,{seam},.F.)")));
@@ -476,29 +516,32 @@ fn emit_cylinder_side(
 ///
 /// **不能用 `CIRCULAR_ARC`**：它不是 ISO 10303-42 的核心实体（那是 AP242 的扩展），
 /// FreeCAD 读不认，把它退化成 `Line`——实测体积直接算成 6.67e+101。
-/// 标准写法是「整圆 + 用角度参数裁剪」：
 ///
-/// ```text
-/// #n = CIRCLE('', axis2_placement_3d, radius);
-/// #m = TRIMMED_CURVE('', #n, (PARAMETER_VALUE(0.)), (PARAMETER_VALUE(1.57)), .T., .PARAMETER.);
-/// ```
-fn arc_entity(w: &mut P21, from: [f64; 3], center: [f64; 3], axis: [f64; 3], sweep: f64) -> String {
+/// **参考方向取弧起点**，角度固定 0 → π：
+/// - 所有弧都是半圆，两端正好落在 0 和 π 上，不需要算绝对角度；
+/// - 避开了 `end = 2π` 触周期边界的问题（那种弧 FreeCAD 认不出来）。
+fn arc_entity(
+    w: &mut P21,
+    from: [f64; 3],
+    center: [f64; 3],
+    axis: [f64; 3],
+    radius: f64,
+    half: bool,
+) -> String {
     let co = w.add(&format!("CARTESIAN_POINT('',{})", pt(center)));
     let ad = w.add(&format!("DIRECTION('',{})", pt(axis)));
     let rdir = normalize(sub(from, center)).unwrap_or([1.0, 0.0, 0.0]);
     let rd = w.add(&format!("DIRECTION('',{})", pt(rdir)));
     let pl = w.add(&format!("AXIS2_PLACEMENT_3D('',{co},{ad},{rd})"));
-    let radius = dot(sub(from, center), rdir).abs();
     let circle = w.add(&format!("CIRCLE('',{pl},{})", num(radius)));
-    // sense = .T. 表示沿圆的正向（逆时针）取弧；反向时取绝对值并翻转
-    let (sense, mag) = if sweep >= 0.0 {
-        (".T.", sweep)
+    let sweep = if half {
+        std::f64::consts::PI
     } else {
-        (".F.", -sweep)
+        std::f64::consts::TAU
     };
     w.add(&format!(
-        "TRIMMED_CURVE('',{circle},(PARAMETER_VALUE(0.)),(PARAMETER_VALUE({})),{sense},.PARAMETER.)",
-        num(mag)
+        "TRIMMED_CURVE('',{circle},(PARAMETER_VALUE(0.)),(PARAMETER_VALUE({})),.T.,.PARAMETER.)",
+        num(sweep)
     ))
 }
 
