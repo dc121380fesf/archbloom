@@ -216,21 +216,50 @@ pub fn merge_coplanar(solid: &Solid) -> Result<(Solid, MergeStats), KernelError>
 
     let work: Vec<Work> = slots.into_iter().flatten().collect();
 
-    let mut holed = 0usize;
-    let mut out_faces = Vec::with_capacity(work.len());
-    for w in &work {
-        if !w.face.holes.is_empty() {
-            holed += 1;
+    // ── 重建顶点池：只保留被面引用的顶点 ──
+    //
+    // 面合并后一大批顶点不再被任何面使用（V 不降、E 和 F 降），
+    // 欧拉数会熚到几千（实测 3148→73 面时欧拉 2613，本该是 0）。
+    // 这也会让 STEP 文件里多出成百上千个没人用的 VERTEX_POINT。
+    let mut remap: HashMap<u32, u32> = HashMap::new();
+    let mut new_verts: Vec<Point3> = Vec::new();
+    let mut keep = |old: u32, solid: &Solid, verts: &mut Vec<Point3>| -> u32 {
+        if let Some(&n) = remap.get(&old) {
+            return n;
         }
-        out_faces.push(w.face.clone());
+        let n = verts.len() as u32;
+        verts.push(solid.verts[old as usize]);
+        remap.insert(old, n);
+        n
+    };
+    let mut out_faces_final: Vec<Face> = Vec::with_capacity(work.len());
+    for w in &work {
+        let surface = w.face.surface;
+        let ring: Vec<u32> = w
+            .face
+            .verts
+            .iter()
+            .map(|&v| keep(v, solid, &mut new_verts))
+            .collect();
+        let holes: Vec<Vec<u32>> = w
+            .face
+            .holes
+            .iter()
+            .map(|h| h.iter().map(|&v| keep(v, solid, &mut new_verts)).collect())
+            .collect();
+        out_faces_final.push(Face {
+            surface,
+            verts: ring,
+            holes,
+        });
     }
-
     let out = Solid {
-        verts: solid.verts.clone(),
-        faces: out_faces,
+        verts: new_verts,
+        faces: out_faces_final,
         analytic_volume: solid.analytic_volume,
         analytic_area: solid.analytic_area,
     };
+    let holed = out.faces.iter().filter(|f| !f.holes.is_empty()).count();
     let stats = MergeStats {
         faces_before: n,
         faces_after: out.faces.len(),
@@ -316,7 +345,7 @@ fn try_splice(
             seen.insert(v, i);
         }
 
-        let Some((p1, p2)) = dup else {
+        let Some((_p1, _p2)) = dup else {
             return Some(Face {
                 surface: a.surface,
                 verts: ring,
@@ -329,56 +358,75 @@ fn try_splice(
             return None;
         }
 
-        // 分成两环
-        let ring_a: Vec<u32> = ring[p1..p2].to_vec();
-        let mut ring_b: Vec<u32> = ring[p2..].to_vec();
-        ring_b.extend_from_slice(&ring[..p1]);
-        if ring_a.len() < 3 || ring_b.len() < 3 {
-            return None;
-        }
-
-        // 投影到面内二维，判断包含关系
-        let (u, w) = crate::geom::orthonormal_basis(normal)?;
-        let origin = solid.verts[ring_a[0] as usize];
-        let to2 = |i: u32| -> [f64; 2] {
-            let d = sub(solid.verts[i as usize], origin);
-            [dot(d, u), dot(d, w)]
-        };
-        let pa2: Vec<[f64; 2]> = ring_a.iter().map(|&i| to2(i)).collect();
-        let pb2: Vec<[f64; 2]> = ring_b.iter().map(|&i| to2(i)).collect();
-        let aa = poly_area2(&pa2).abs();
-        let ab = poly_area2(&pb2).abs();
-        if aa <= 0.0 || ab <= 0.0 {
-            return None;
-        }
-
-        // **洞太小的就拒掉**：那是提前闭合留下的碎片，不是真孔。
+        // ── 多环切分（用栈）──
         //
-        // 实测：不卡这一条时，顶面会形成 47 个 6 点的碎片洞（半径差 55%），
-        // 孔口写不成圆边，STEP 壳不闭合。真实的孔（Φ10 在 20×20 板上）
-        // 面积占比 ~20%，碎片则远小于 1%。
-        let small = aa.min(ab);
-        let big = aa.max(ab);
-        if small / big < 0.02 {
+        // **不能只按第一个重复顶点切**。实测两个面共享 3 条边时
+        // ring 会出现 **2 个**重复顶点（如 [(14,2,17),(5,1,18)]），
+        // 只切第一个会让第二个被忽略，环直接错位——
+        // 这就是洞的边界跑到 r=3.6~13.9mm 的根因。
+        //
+        // 正确做法：沿 ring 走，遇到已出现过的顶点就闭合一个环、回退到那个位置。
+        // 相当于把一条自交的路径拆成若干个简单环。
+        let mut loops: Vec<Vec<u32>> = Vec::new();
+        {
+            let mut stack: Vec<u32> = Vec::new();
+            let mut pos_at: HashMap<u32, usize> = HashMap::new();
+            for &v in &ring {
+                if let Some(&p) = pos_at.get(&v) {
+                    let lp: Vec<u32> = stack[p..].to_vec();
+                    if lp.len() >= 3 {
+                        loops.push(lp);
+                    }
+                    for &x in &stack[p..] {
+                        pos_at.remove(&x);
+                    }
+                    stack.truncate(p);
+                }
+                pos_at.insert(v, stack.len());
+                stack.push(v);
+            }
+            if stack.len() >= 3 {
+                loops.push(stack);
+            }
+        }
+
+        if loops.is_empty() {
             return None;
         }
 
-        let (outer, inner, inner2) = if aa > ab {
-            (ring_a, ring_b, pb2)
-        } else {
-            (ring_b, ring_a, pa2)
+        // 面积最大的当外环，其余若完全在它内部就当洞
+        let (u2, w2) = crate::geom::orthonormal_basis(normal)?;
+        let origin2 = solid.verts[loops[0][0] as usize];
+        let to2 = |i: u32| -> [f64; 2] {
+            let d = sub(solid.verts[i as usize], origin2);
+            [dot(d, u2), dot(d, w2)]
         };
-        let outer2: Vec<[f64; 2]> = outer.iter().map(|&i| to2(i)).collect();
+        let mut measured: Vec<(f64, Vec<u32>, Vec<[f64; 2]>)> = loops
+            .into_iter()
+            .map(|lp| {
+                let pts: Vec<[f64; 2]> = lp.iter().map(|&i| to2(i)).collect();
+                (poly_area2(&pts).abs(), lp, pts)
+            })
+            .collect();
+        measured.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        // 小环必须完全在大环内部，否则是自交
-        if !inner2.iter().all(|&p| point_in_poly(p, &outer2)) {
-            return None;
+        let (outer_area, outer, outer_pts) = measured.remove(0);
+        let mut holes: Vec<Vec<u32>> = Vec::new();
+        for (area, lp, pts) in measured {
+            // 洞必须比外环小且完全在内部，否则这次拼接不可靠
+            if area >= outer_area || area / outer_area < 0.02 {
+                return None;
+            }
+            if !pts.iter().all(|&p| point_in_poly(p, &outer_pts)) {
+                return None;
+            }
+            holes.push(lp);
         }
 
         return Some(Face {
             surface: a.surface,
             verts: outer,
-            holes: vec![inner],
+            holes,
         });
     }
     None

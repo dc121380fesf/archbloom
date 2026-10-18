@@ -1,0 +1,44 @@
+{
+ "ops": [
+  {
+   "op": "io.load_scene",
+   "args": {
+    "path": "D:/Word/deliverables_xzs/xzs_villa_scene.json"
+   }
+  },
+  {
+   "op": "object.delete",
+   "args": {
+    "id": "obj-172"
+   }
+  },
+  {
+   "op": "camera.create",
+   "args": {
+    "name": "cam_06_master",
+    "translation": [
+     4.2,
+     4.7,
+     5.1
+    ],
+    "target": [
+     1.6,
+     1.2,
+     4.7
+    ],
+    "lens_mm": 20
+   }
+  },
+  {
+   "op": "render.high_quality",
+   "args": {
+    "path": "D:/Word/deliverables_xzs/06_master.png",
+    "width": 1400,
+    "height": 900,
+    "spp": 128,
+    "exposure": 0.9,
+    "renderer": "gpu"
+   }
+  }
+ ]
+}

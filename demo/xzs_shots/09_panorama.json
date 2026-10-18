@@ -1,0 +1,44 @@
+{
+ "ops": [
+  {
+   "op": "io.load_scene",
+   "args": {
+    "path": "D:/Word/deliverables_xzs/xzs_villa_scene.json"
+   }
+  },
+  {
+   "op": "object.delete",
+   "args": {
+    "id": "obj-172"
+   }
+  },
+  {
+   "op": "camera.create",
+   "args": {
+    "name": "cam_09_panorama",
+    "translation": [
+     6,
+     -5.8,
+     1.65
+    ],
+    "target": [
+     6,
+     2,
+     3.5
+    ],
+    "lens_mm": 24
+   }
+  },
+  {
+   "op": "render.panorama",
+   "args": {
+    "path": "D:/Word/deliverables_xzs/09_panorama.png",
+    "width": 4096,
+    "height": 2048,
+    "spp": 32,
+    "exposure": 0.55,
+    "renderer": "gpu"
+   }
+  }
+ ]
+}
