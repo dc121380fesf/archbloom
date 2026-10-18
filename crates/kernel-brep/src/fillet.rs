@@ -416,9 +416,13 @@ pub fn fillet_solid(
             ring_pts.push(p2);
         }
         // 去重
+        //
+        // 阈值不能用 1e-18（距离 1e-9）——轨线端点是两组不同路径算出来的，
+        // 浮点差异远大于 1e-9，相同位置被判成不同点，角部面就会有一堆重复顶点，
+        // 拓扑直接断掉（实测 246 条孤边 / 345 条总边）。
         let mut uniq: Vec<Point3> = Vec::new();
         for p in ring_pts {
-            if !uniq.iter().any(|q| dist2(*q, p) < 1e-18) {
+            if !uniq.iter().any(|q| dist2(*q, p) < 1e-12) {
                 uniq.push(p);
             }
         }
