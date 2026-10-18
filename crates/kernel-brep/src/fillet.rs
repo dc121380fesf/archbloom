@@ -489,6 +489,21 @@ pub fn fillet_solid(
 
     out.analytic_volume = None;
     out.analytic_area = None;
+    // 半边拓扑自检：把断裂点直接暴露出来
+    out.build_topology();
+    if std::env::var("ARCHCORE_DEBUG_FILLET").is_ok() {
+        let problems = out.check_topology();
+        eprintln!(
+            "[fillet] 半边 {} 边 {} 边界半边 {} 问题 {} 条",
+            out.half_edges.len(),
+            out.edges.len(),
+            out.boundary_half_edges(),
+            problems.len()
+        );
+        for p in problems.iter().take(6) {
+            eprintln!("  {p}");
+        }
+    }
     Ok(out)
 }
 
