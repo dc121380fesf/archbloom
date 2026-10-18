@@ -37,7 +37,17 @@ pub struct Capabilities {
     /// 平面-圆柱是二次曲线，圆柱-圆柱是四次空间曲线。agent 需要知道边界在哪。
     pub curved_bool: bool,
 
-    /// 支持倒角/圆角。
+    /// 支持平面倒角（chamfer）：锐边切成平面斜面。
+    ///
+    /// 与 [`Self::fillet`] 分开：chamfer 是直线切口，fillet 是圆弧过渡。
+    /// 两者的加工工艺和验收标准都不同，合并成一个布尔位会让 agent 无法判断
+    /// 自己要的“R0.5 圆角”到底能不能做。
+    pub chamfer: bool,
+
+    /// 支持圆角（fillet）：锐边换成圆弧面。
+    ///
+    /// **申报必须与实际一致。** 声明 `fillet: true` 却返回 `Unsupported` 是 bug，
+    /// 会让 agent 规划出一条走不通的路线，浪费它一整轮。
     pub fillet: bool,
 
     /// 支持 STEP 读写。
@@ -61,6 +71,7 @@ impl Capabilities {
             backend,
             solid_bool: false,
             curved_bool: false,
+            chamfer: false,
             fillet: false,
             step_io: false,
             exact: false,
@@ -77,7 +88,7 @@ mod tests {
     fn 空壳后端不冒领任何能力() {
         let c = Capabilities::none("test");
         assert_eq!(c.backend, "test");
-        assert!(!c.solid_bool && !c.curved_bool && !c.fillet && !c.step_io && !c.exact);
+        assert!(!c.solid_bool && !c.curved_bool && !c.chamfer && !c.fillet && !c.step_io && !c.exact);
         assert_eq!(c.max_precision, 0.0);
     }
 }

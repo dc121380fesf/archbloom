@@ -91,10 +91,30 @@ pub trait GeometryKernel: Send + Sync {
     /// 释放实体。不存在时静默返回（幂等）——重复释放不该报错。
     fn drop_solid(&mut self, id: SolidId);
 
-    /// 可选：倒角/圆角。
+    /// 可选：平面倒角（chamfer）。
     ///
-    /// 默认返回不支持。几何上倒角比布尔更难（曲面延伸 + 求交 + 裁剪 + 重建），
-    /// 网格后端通常做不到，只有精确后端才有。
+    /// `edges` 为空表示「所有锐边」；非空时只倒指定的边。
+    /// `width` 是从原棱起算、向两侧面各切进的尺寸（米）。
+    ///
+    /// 默认返回不支持。几何上倒角比布尔更难（平移面 + 重建环 + 补角面），
+    /// 网格后端通常做不到。
+    fn chamfer(
+        &mut self,
+        _id: SolidId,
+        _edges: &[EdgeId],
+        _width: f64,
+        _cancel: &CancelToken,
+    ) -> Result<SolidId, KernelError> {
+        Err(KernelError::Unsupported {
+            feature: "chamfer",
+            alternatives: vec!["用网格后端并手动构造斜面", "切换到精确后端"],
+        })
+    }
+
+    /// 可选：圆角（fillet）。
+    ///
+    /// 默认返回不支持。圆角比倒角更难：需要圆柱面 + 圆弧边界 + 曲面求交，
+    /// 只有精确后端才有能力，而且实现成本高一个量级。
     fn fillet(
         &mut self,
         _id: SolidId,
@@ -104,7 +124,7 @@ pub trait GeometryKernel: Send + Sync {
     ) -> Result<SolidId, KernelError> {
         Err(KernelError::Unsupported {
             feature: "fillet",
-            alternatives: vec!["改用 chamfer", "切换到精确后端"],
+            alternatives: vec!["改用 chamfer（平面切口）", "切换到精确后端"],
         })
     }
 

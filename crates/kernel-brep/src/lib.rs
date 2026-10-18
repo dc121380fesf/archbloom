@@ -34,6 +34,7 @@
 //! ```
 
 mod bsp;
+mod chamfer;
 mod csg;
 mod geom;
 mod kernel;
@@ -43,6 +44,7 @@ mod step;
 mod stl;
 
 pub use bsp::{difference, intersection, union, Node, Plane, Polygon};
+pub use chamfer::{chamfer_solid, edge_table, ChamferOptions, EdgeRec};
 pub use csg::{point_inside, select_faces, split_all};
 pub use geom::{Curve, Surface};
 pub use kernel::{shared, BrepKernel};

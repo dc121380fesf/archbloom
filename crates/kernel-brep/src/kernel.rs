@@ -24,10 +24,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use archcore_kernel::{
-    BoolOp, CancelToken, Capabilities, GeometryKernel, KernelError, Point3, Progress, SolidFacts,
-    SolidId, Tess,
+    BoolOp, CancelToken, Capabilities, EdgeId, GeometryKernel, KernelError, Point3, Progress,
+    SolidFacts, SolidId, Tess,
 };
 
+use crate::chamfer::{chamfer_solid, ChamferOptions};
 use crate::solid::{box_solid, cylinder_solid, volume_from_mesh, Solid};
 
 /// 精确内核：ID → 实体。ID 单调递增、永不复用。
@@ -92,7 +93,8 @@ impl GeometryKernel for BrepKernel {
         c.curved_bool = false;
         // STEP 导出已可用（全 PLANE 的合法实体；真曲面面待下一步）
         c.step_io = true;
-        // 倒角（I）仍未实现，如实报 false
+        // 平面倒角已可用（切平面斜面）；圆角（圆弧过渡）仍未做，如实报 false
+        c.chamfer = true;
         c
     }
 
@@ -212,6 +214,35 @@ impl GeometryKernel for BrepKernel {
 
     fn drop_solid(&mut self, id: SolidId) {
         self.solids.remove(&id);
+    }
+
+    fn chamfer(
+        &mut self,
+        id: SolidId,
+        edges: &[EdgeId],
+        width: f64,
+        cancel: &CancelToken,
+    ) -> Result<SolidId, KernelError> {
+        if cancel.is_cancelled() {
+            return Err(KernelError::Unsupported {
+                feature: "chamfer（已取消）",
+                alternatives: vec!["重新发起一次倒角"],
+            });
+        }
+        let s = self
+            .solids
+            .get(&id)
+            .ok_or(KernelError::UnknownSolid { id })?;
+        let ids: Vec<u64> = edges.iter().map(|e| e.0).collect();
+        let out = chamfer_solid(
+            s,
+            &ids,
+            &ChamferOptions {
+                width,
+                angle_threshold_deg: 30.0,
+            },
+        )?;
+        Ok(self.insert(out))
     }
 
     fn to_step(&self, id: SolidId) -> Result<String, KernelError> {
