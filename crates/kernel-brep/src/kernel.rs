@@ -54,7 +54,15 @@ impl BrepKernel {
     }
 
     /// 放进一个实体（构造器产出的直接入池）。
-    pub fn insert(&mut self, solid: Solid) -> SolidId {
+    /// 把一个实体入库。
+    ///
+    /// 入库时**顺手建拓扑**：半边/边表不是每个 `Solid` 构造函数都会填的
+    /// （`box_solid` / `cylinder_solid` 就不填），不建的话界面上会看到「边 0」，
+    /// 而且后续按边寻址（倒角选边、`boundary_half_edges`）全部失效。
+    pub fn insert(&mut self, mut solid: Solid) -> SolidId {
+        if solid.half_edges.is_empty() && !solid.faces.is_empty() {
+            solid.build_topology();
+        }
         let id = SolidId(self.next);
         self.next += 1;
         self.solids.insert(id, solid);
