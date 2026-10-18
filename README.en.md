@@ -8,7 +8,7 @@
 
 <p align="center">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-core-orange">
-  <img alt="tests" src="https://img.shields.io/badge/tests-242%20green">
+  <img alt="tests" src="https://img.shields.io/badge/tests-249%20green">
   <img alt="clippy" src="https://img.shields.io/badge/clippy-0%20warnings-blue">
   <img alt="license" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue">
 </p>
@@ -86,7 +86,7 @@ reports it explicitly rather than failing silently.
 
 ## Engineering
 
-- **242 tests green / clippy 0 warnings**; an independent code audit closed 15/15 findings, including a negative-case net across the hostile-input surface
+- **249 tests green / clippy 0 warnings**; an independent code audit closed 15/15 findings, including a negative-case net across the hostile-input surface
 - Two rendering tracks: a deterministic CPU track and a fast GPU track. Stable IDs are never reused; dual-hash fact surfaces; explicit transaction boundaries
 - Built from scratch: the IR scene format, half-edge topology, the path tracer, the WebGL2 viewer, a STEP Part 21 parser
 

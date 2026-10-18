@@ -8,7 +8,7 @@
 
 <p align="center">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-core-orange">
-  <img alt="tests" src="https://img.shields.io/badge/tests-242%20green">
+  <img alt="tests" src="https://img.shields.io/badge/tests-249%20green">
   <img alt="clippy" src="https://img.shields.io/badge/clippy-0%20warnings-blue">
   <img alt="license" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue">
 </p>
@@ -68,6 +68,7 @@ archbloom-run my_scene.json
 | **文档** | 桌面工作台带完整文件菜单（新建 / 打开 / 保存 / 另存为 / 导出）；`.al` 自包含存档把场景与贴图收进单文件，换机器直接开 |
 | **互转** | FBX 双向（Blender 桥）、IFC 导入导出、glTF/GLB、3ds Max 链、场景 JSON |
 | **agent 面** | MCP 服务（stdio）+ CLI + compose 编排层；结构化报错带步骤号，fail-closed |
+| **精确内核** | 自研窄 B-rep：解析曲面 + 闭式体积 + 平面布尔 + **平面倒角**（C0.5）+ 边查询；**STEP 输出**（FreeCAD 独立回读验证） |
 
 ## 快速开始
 
@@ -80,7 +81,7 @@ archbloom-run my_scene.json
 
 ## 工程质量
 
-- **242 测试全绿 / clippy 0 警告**；独立代码审计 15/15 清偿（含敌对输入面负例网）
+- **249 测试全绿 / clippy 0 警告**；独立代码审计 15/15 清偿（含敌对输入面负例网）
 - 确定性渲染轨（CPU）+ 速度轨（GPU）双轨制；稳定 ID 不复用、双哈希事实面、事务进出
 - 自研核心：IR 场景格式、半边拓扑、路径追踪器、WebGL2 查看器、STEP P21 解析器
 
