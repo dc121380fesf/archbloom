@@ -30,7 +30,7 @@
 //! 合并**不改变几何**：顶点池原样保留，只重排面的组织方式。
 //! 所以体积、水密性必须与合并前一致——这是验收口径。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use archcore_kernel::{KernelError, Point3, Vector3};
 
@@ -86,10 +86,12 @@ pub fn merge_coplanar(solid: &Solid) -> Result<(Solid, MergeStats), KernelError>
         });
     }
 
-    // 反复拼接：用**槽位 + 增量边表 + 候选队列**，避免每轮全量重扫。
+    // 反复拼接：用**槽位 + 增量边表 + 优先队列**，避免每轮全量重扫。
     //
-    // 上一版每轮都重建 edge_map 并遍历所有共享边配对，3148 面要跑 415 秒。
-    // 这里改成：合并只更新受影响的两面边记录，新产生的配对入队。
+    // 队列按**共享边长度降序**：长边优先，让面先沿大边界（外框）向外长，
+    // 最后才在孔壁附近的小边处收口。
+    // 早先用普通 VecDeque，拼接顺序被 HashMap 遍历顺序支配，
+    // 局部碎片先自己闭成环，结果形成 79 个**小洞**（理论应该只有 2 个大洞）。
     let mut slots: Vec<Option<Work>> = work.into_iter().map(Some).collect();
 
     // 边 → 占用它的槽位
@@ -104,11 +106,18 @@ pub fn merge_coplanar(solid: &Solid) -> Result<(Solid, MergeStats), KernelError>
         }
     }
 
-    // 候选配对队列（边上有两个可合并面）
-    let mut queue: std::collections::VecDeque<(u32, u32)> = std::collections::VecDeque::new();
-    for (e, users) in &edge_slots {
-        if users.len() == 2 {
-            queue.push_back(*e);
+    let mut queue: VecDeque<(u32, u32)> = VecDeque::new();
+    {
+        // 初始顺序必须**确定**：HashMap 遍历顺序随机，不排序的话同输入每次跑出
+        // 不同面数（467 / 476 / 484 波动）。拼接是贪心的，顺序一变结果就变。
+        let mut init: Vec<(u32, u32)> = edge_slots
+            .iter()
+            .filter(|(_, users)| users.len() == 2)
+            .map(|(e, _)| *e)
+            .collect();
+        init.sort_unstable();
+        for e in init {
+            queue.push_back(e);
         }
     }
 
@@ -178,14 +187,14 @@ pub fn merge_coplanar(solid: &Solid) -> Result<(Solid, MergeStats), KernelError>
                 queue.push_back(edge);
             }
         }
-        // 也把 j 腾空后可能变“可配对”的邻居重新入队（保守做法：把所有与 i 共边的边入队）
+        // 也把 i 共边的边入队
         for edge in ring_edges(&new_face.verts) {
             queue.push_back(edge);
         }
 
         // 关键补充：把**邻居的所有边**也入队。
         // 只 push 新面自己的边时，那些「本来因邻居被并掉而变回单面」的边不会被重试，
-        // 合并会提前收敛（实测 509 面而非 256）。
+        // 合并会提前收敛。
         let mut neighbors: Vec<usize> = Vec::new();
         for edge in ring_edges(&new_face.verts) {
             if let Some(v) = edge_slots.get(&edge) {
