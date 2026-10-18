@@ -19,6 +19,7 @@
 //! 「Φ10 孔」的精确体积是 π·r²·h。如果从三角化量，结果依赖离散段数——
 //! 那就不是定义，是逼近。K3 闸门要的就是这个区别。
 
+use std::collections::HashMap;
 use std::f64::consts::PI;
 
 use archcore_kernel::{Point3, Vector3};
@@ -47,14 +48,42 @@ impl Face {
     }
 }
 
-/// 实体：顶点池 + 面表。
+/// 一条有向半边。
+#[derive(Clone, Copy, Debug)]
+pub struct HalfEdge {
+    /// 起点顶点。
+    pub origin: u32,
+    /// 反向半边在 `half_edges` 里的下标（无反向时是 `usize::MAX`）。
+    pub twin: usize,
+    /// 环上的下一条半边。
+    pub next: usize,
+    /// 所属面（调试用）。
+    pub face: usize,
+    /// 所属边在 `edges` 里的下标（未配对时为 `usize::MAX`）。
+    pub edge: usize,
+}
+
+/// 一条无向边：两个互为 twin 的半边。
+#[derive(Clone, Copy, Debug)]
+pub struct Edge {
+    pub he: (usize, usize),
+}
+
+/// 实体：顶点池 + 面表 + **显式半边拓扑**。
 ///
-/// 边表暂不单列——D 阶段的拓扑检查（水密、欧拉公式）只需要顶点/面。
-/// 边的显式表示等倒角（阶段 I）真正需要时再加，避免过早建模。
+/// # 为什么要有半边
+///
+/// 边的身份不能靠「两个顶点号组成的有序对」推导——两个面如果不是同一次算出来的，
+/// 索引就不保证相同，只能靠 weld 合并坐标，浮点一抖就合不上。
+/// 倒角、面片合并、圆角三个功能都栽在这里（详见 docs/half-edge-refactor.md）。
 #[derive(Clone, Debug, Default)]
 pub struct Solid {
     pub verts: Vec<Point3>,
     pub faces: Vec<Face>,
+    /// 半边表：每个面的每个环都展开成一条半边链。
+    pub half_edges: Vec<HalfEdge>,
+    /// 边表：每条无向边一对互为 twin 的半边。
+    pub edges: Vec<Edge>,
     /// 构造器给出的闭式体积（立方米）。None 表示未知，需要三角化估算。
     pub analytic_volume: Option<f64>,
     /// 构造器给出的闭式面积。
@@ -92,7 +121,103 @@ impl Solid {
         (lo, hi)
     }
 
-    /// 是否水密：每条无向边恰好被两个面共享。
+    /// 从面表构建半边与边拓扑。
+    ///
+    /// 唯一入口：任何几何操作后重建一次，然后跑 [`Self::check_topology`] 自检。
+    ///
+    /// 配对规则：有向边 `(a,b)` 与 `(b,a)` 互为 twin。
+    /// 找不到反向的称为**边界半边**（非闭合壳），不算错误，但要能看出来。
+    pub fn build_topology(&mut self) {
+        self.half_edges.clear();
+        self.edges.clear();
+
+        // 1. 每个面的每个环展开成半边链
+        for (fi, f) in self.faces.iter().enumerate() {
+            for ring in f.all_rings() {
+                let n = ring.len();
+                if n < 3 {
+                    continue;
+                }
+                let start = self.half_edges.len();
+                for (i, &v) in ring.iter().enumerate() {
+                    self.half_edges.push(HalfEdge {
+                        origin: v,
+                        twin: usize::MAX,
+                        next: start + (i + 1) % n,
+                        face: fi,
+                        edge: usize::MAX,
+                    });
+                }
+            }
+        }
+
+        // 2. 配对：用 (起点, 终点) 查反向
+        let mut by_pair: HashMap<(u32, u32), usize> = HashMap::new();
+        for (i, he) in self.half_edges.iter().enumerate() {
+            let a = he.origin;
+            let b = self.half_edges[he.next].origin;
+            by_pair.insert((a, b), i);
+        }
+        for i in 0..self.half_edges.len() {
+            if self.half_edges[i].twin != usize::MAX {
+                continue;
+            }
+            let a = self.half_edges[i].origin;
+            let b = self.half_edges[self.half_edges[i].next].origin;
+            if let Some(&j) = by_pair.get(&(b, a)) {
+                if j != i && self.half_edges[j].twin == usize::MAX {
+                    self.half_edges[i].twin = j;
+                    self.half_edges[j].twin = i;
+                    let e = self.edges.len();
+                    self.half_edges[i].edge = e;
+                    self.half_edges[j].edge = e;
+                    self.edges.push(Edge { he: (i, j) });
+                }
+            }
+        }
+    }
+
+    /// 拓扑自检。返回问题列表，空表示健康。
+    pub fn check_topology(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        for (i, he) in self.half_edges.iter().enumerate() {
+            if he.next >= self.half_edges.len() {
+                problems.push(format!("半边 {i} 的 next 越界"));
+                continue;
+            }
+            if he.twin != usize::MAX {
+                if he.twin >= self.half_edges.len() {
+                    problems.push(format!("半边 {i} 的 twin 越界"));
+                } else if self.half_edges[he.twin].twin != i {
+                    problems.push(format!("半边 {i} 的 twin 不对称"));
+                }
+            }
+        }
+        // 每条边必须恰好两个半边
+        if !self.half_edges.len().is_multiple_of(2) {
+            problems.push(format!(
+                "半边数 {} 为奇数，必有未配对的边界半边",
+                self.half_edges.len()
+            ));
+        }
+        if self.edges.len() * 2 != self.half_edges.len() {
+            problems.push(format!(
+                "边数 {} × 2 ≠ 半边数 {}",
+                self.edges.len(),
+                self.half_edges.len()
+            ));
+        }
+        problems
+    }
+
+    /// 统计未配对的边界半边数（闭合实体应为 0）。
+    pub fn boundary_half_edges(&self) -> usize {
+        self.half_edges
+            .iter()
+            .filter(|h| h.twin == usize::MAX)
+            .count()
+    }
+
     ///
     /// **内环（洞）的边也要算**。合并共面面片之后，顶面的内圆边只出现在 `holes` 里，
     /// 只看 `verts` 会把这些边当成孤立边，误报「不水密」。

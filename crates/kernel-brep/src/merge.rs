@@ -269,12 +269,15 @@ pub fn merge_coplanar(solid: &Solid) -> Result<(Solid, MergeStats), KernelError>
             holes,
         });
     }
-    let out = Solid {
+    let mut out = Solid {
         verts: new_verts,
         faces: out_faces_final,
+        half_edges: Vec::new(),
+        edges: Vec::new(),
         analytic_volume: solid.analytic_volume,
         analytic_area: solid.analytic_area,
     };
+    out.build_topology();
     let holed = out.faces.iter().filter(|f| !f.holes.is_empty()).count();
     let stats = MergeStats {
         faces_before: n,

@@ -163,13 +163,16 @@ pub fn polygons_to_solid(polys: &[Polygon]) -> Result<Solid, KernelError> {
         });
     }
 
-    let solid = Solid {
+    let mut solid = Solid {
         verts,
         faces,
+        half_edges: Vec::new(),
+        edges: Vec::new(),
         // 布尔结果没有闭式解：体积由三角化估算（散度定理，误差随离散度收敛）
         analytic_volume: None,
         analytic_area: None,
     };
+    solid.build_topology();
 
     if !solid.is_watertight() {
         return Err(KernelError::TopologyBroken {
