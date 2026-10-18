@@ -7,3 +7,7 @@ node_modules/
 *.step
 *.stl
 *.STEP
+# demo 脚本产物（由 make_xzs_villa.py / gen_dark_tiles.py 生成，不入库）
+demo/xzs_villa.json
+demo/xzs_shots/
+demo/tex/dark_tiles.jpg
