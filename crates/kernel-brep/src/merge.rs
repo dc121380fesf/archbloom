@@ -122,12 +122,27 @@ pub fn merge_coplanar(solid: &Solid) -> Result<(Solid, MergeStats), KernelError>
     }
 
     let mut guard = 0usize;
-    let max_ops = n * 8 + 64;
-    while let Some(e) = queue.pop_front() {
-        guard += 1;
-        if guard > max_ops {
-            break;
+    let max_ops = n * 16 + 64;
+    // 两轮：第一轮禁止产生洞（让面先连成大片），第二轮才允许闭合。
+    // 单轮时相邻两块刚拼上就围出小圈，洞边界会碎成锯齿。
+    for _pass in [false, true] {
+        // 每轮开头重新收集可配对边（确定性排序）
+        {
+            let mut init: Vec<(u32, u32)> = edge_slots
+                .iter()
+                .filter(|(_, users)| users.len() == 2)
+                .map(|(e, _)| *e)
+                .collect();
+            init.sort_unstable();
+            for e in init {
+                queue.push_back(e);
+            }
         }
+        while let Some(e) = queue.pop_front() {
+            guard += 1;
+            if guard > max_ops {
+                break;
+            }
         let users = match edge_slots.get(&e) {
             Some(u) if u.len() == 2 => u.clone(),
             _ => continue,
@@ -211,6 +226,7 @@ pub fn merge_coplanar(solid: &Solid) -> Result<(Solid, MergeStats), KernelError>
                     queue.push_back(edge);
                 }
             }
+        }
         }
     }
 

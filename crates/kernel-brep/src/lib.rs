@@ -37,6 +37,7 @@ mod bsp;
 mod chamfer;
 mod csg;
 mod edges;
+mod fix_holes;
 mod geom;
 mod kernel;
 mod merge;
@@ -53,6 +54,7 @@ pub use csg::{point_inside, select_faces, split_all};
 pub use geom::{Curve, Surface};
 pub use kernel::{shared, BrepKernel};
 pub use merge::{merge_coplanar, MergeStats};
+pub use fix_holes::fix_holes_with_cylinder_rings;
 pub use poly2d::triangulate_face as poly2d_triangulate;
 pub use rebuild::{polygons_to_solid, solid_to_polygons, WELD_TOL};
 pub use solid::{
