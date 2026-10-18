@@ -275,80 +275,9 @@ pub fn fillet_solid(
         }
     }
 
-    // ── 3. 角部补面 ──
-    //
-    // 一个顶点周围有 3 条圆角边 → 产生 6 个切点（每条边在两侧面各一个），
-    // 它们围成一圈，但没有任何面把它们连起来 → 壳在角部漏气。
-    //
-    // 处理：每个顶点收集自己的所有切点，按绕顶点法线的角度排好，补一个多边形。
-    // 真实圆角这里是个**球面三角**（三块圆角面交汇），
-    // 先用平面多边形逼近——体量误差在 R 量级，比漏水好得多。
-    let mut vertex_cuts: HashMap<u32, Vec<Point3>> = HashMap::new();
-    for ((fi, v), ps) in &cuts {
-        let _ = fi;
-        for p in ps {
-            vertex_cuts.entry(*v).or_default().push(*p);
-        }
-    }
-    for (v, pts) in vertex_cuts {
-        // 去重
-        let mut uniq: Vec<Point3> = Vec::new();
-        for p in &pts {
-            if !uniq.iter().any(|q| dist2(*q, *p) < 1e-18) {
-                uniq.push(*p);
-            }
-        }
-        if uniq.len() < 3 {
-            continue;
-        }
-        // 绕顶点平均法线排序
-        let pv = solid.verts[v as usize];
-        let mut navg = [0.0; 3];
-        for e in table.iter() {
-            if e.a == v || e.b == v {
-                for fi in [e.f1, e.f2] {
-                    let nn = face_normal(solid, fi);
-                    for k in 0..3 {
-                        navg[k] += nn[k];
-                    }
-                }
-            }
-        }
-        let Some(nrm) = normalize(navg) else { continue };
-        let Some((u, w)) = crate::geom::orthonormal_basis(nrm) else {
-            continue;
-        };
-        let mut keyed: Vec<(f64, Point3)> = uniq
-            .into_iter()
-            .map(|p| {
-                let d = sub(p, pv);
-                (dot(d, w).atan2(dot(d, u)), p)
-            })
-            .collect();
-        keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        let ring: Vec<u32> = keyed.into_iter().map(|(_, p)| put!(p)).collect();
-        let ring = dedup(ring);
-        if ring.len() >= 3 {
-            let n = plane_normal(&out, &ring);
-            out.faces.push(Face {
-                surface: Surface::Plane {
-                    origin: out.verts[ring[0] as usize],
-                    normal: n,
-                },
-                verts: ring,
-                holes: Vec::new(),
-            });
-        }
-    }
-
     out.analytic_volume = None;
     out.analytic_area = None;
     Ok(out)
-}
-
-fn dist2(a: Point3, b: Point3) -> f64 {
-    let d = sub(a, b);
-    dot(d, d)
 }
 
 /// 把方向 m1 绕 axis 转到 m2 方向上的 ang 弧度。
