@@ -150,6 +150,7 @@ pub fn polygons_to_solid(polys: &[Polygon]) -> Result<Solid, KernelError> {
                 normal: p.plane.normal,
             },
             verts: ring,
+            holes: Vec::new(),
         });
     }
 

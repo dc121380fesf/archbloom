@@ -25,11 +25,17 @@ use archcore_kernel::{Point3, Vector3};
 
 use crate::geom::{cross, dot, normalize, sub, Surface};
 
-/// 一个面：解析曲面 + 顶点环（逆时针为外法线朝外）。
+/// 一个面：解析曲面 + 环（逆时针为外法线朝外）。
+///
+/// `verts` 是外环，`holes` 是内环（每个内环也应围成逆时针的「洞」方向）。
+/// 开孔板的顶面就是「外方形 + 内圆孔」——一个面两个环。
+/// 面片合并（[`crate::merge`]）之后会产出这种面。
 #[derive(Clone, Debug)]
 pub struct Face {
     pub surface: Surface,
     pub verts: Vec<u32>,
+    /// 内环（孔洞）。空表示简单多边形。
+    pub holes: Vec<Vec<u32>>,
 }
 
 /// 实体：顶点池 + 面表。
@@ -53,7 +59,11 @@ impl Solid {
     }
 
     pub fn push_face(&mut self, surface: Surface, verts: Vec<u32>) -> usize {
-        self.faces.push(Face { surface, verts });
+        self.faces.push(Face {
+            surface,
+            verts,
+            holes: Vec::new(),
+        });
         self.faces.len() - 1
     }
 
@@ -132,8 +142,24 @@ impl Solid {
                 .or_else(|| polygon_normal(&self.verts, &f.verts))
                 .unwrap_or([0.0, 0.0, 1.0]);
 
-            for i in 1..n - 1 {
-                idx.extend_from_slice(&[f.verts[0], f.verts[i], f.verts[i + 1]]);
+            // 三角化：简单面沿用扇形（快，且凸面结果一样）；
+            // 带洞面必须走桥接 + 耳切，否则洞会被扇形剖分「填上」。
+            if f.holes.is_empty() {
+                for i in 1..n - 1 {
+                    idx.extend_from_slice(&[f.verts[0], f.verts[i], f.verts[i + 1]]);
+                }
+            } else {
+                let tris = crate::poly2d::triangulate_face(&self.verts, &f.verts, &f.holes, face_n);
+                for t in tris {
+                    idx.extend_from_slice(&t);
+                }
+                for h in &f.holes {
+                    for v in h {
+                        if let Some(slot) = nrm.get_mut(*v as usize) {
+                            *slot = face_n;
+                        }
+                    }
+                }
             }
             for v in &f.verts {
                 if let Some(slot) = nrm.get_mut(*v as usize) {

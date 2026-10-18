@@ -202,6 +202,7 @@ pub fn chamfer_solid(
         out.faces.push(Face {
             surface: f.surface,
             verts: inset_rings[fi].clone(),
+            holes: Vec::new(),
         });
     }
 

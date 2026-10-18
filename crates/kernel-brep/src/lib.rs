@@ -39,6 +39,8 @@ mod csg;
 mod edges;
 mod geom;
 mod kernel;
+mod merge;
+mod poly2d;
 mod rebuild;
 mod solid;
 mod step;
@@ -50,6 +52,8 @@ pub use edges::{list_edges, EdgeInfo};
 pub use csg::{point_inside, select_faces, split_all};
 pub use geom::{Curve, Surface};
 pub use kernel::{shared, BrepKernel};
+pub use merge::{merge_coplanar, MergeStats};
+pub use poly2d::triangulate_face as poly2d_triangulate;
 pub use rebuild::{polygons_to_solid, solid_to_polygons, WELD_TOL};
 pub use solid::{
     box_solid, cylinder_solid, segments_for_tolerance, volume_from_mesh, Face, Solid,
