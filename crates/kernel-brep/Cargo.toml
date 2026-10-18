@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 archcore-kernel = { path = "../kernel" }
+serde = { workspace = true }
 
 [dev-dependencies]
 archcore-kernel = { path = "../kernel" }

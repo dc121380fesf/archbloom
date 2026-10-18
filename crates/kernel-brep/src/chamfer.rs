@@ -52,13 +52,15 @@ impl Default for ChamferOptions {
 
 /// 一条无向边的完整信息。
 pub struct EdgeRec {
-    a: u32,
-    b: u32,
+    pub a: u32,
+    pub b: u32,
     /// 两个相邻面。水密实体必有恰好两个。
-    f1: usize,
-    f2: usize,
+    pub f1: usize,
+    pub f2: usize,
     /// 是否达到倒角条件。
-    sharp: bool,
+    pub sharp: bool,
+    /// 两面法线夹角（度）。给边查询用；倒角自身的判据是 [`Self::sharp`]。
+    pub angle_deg: f64,
 }
 
 /// 对实体做平面倒角，返回新实体。
@@ -319,6 +321,7 @@ pub fn edge_table(solid: &Solid) -> Result<Vec<EdgeRec>, KernelError> {
             f1,
             f2,
             sharp: ang > 30.0,
+            angle_deg: ang,
         });
     }
     // 确定性排序：按顶点号，保证同一实体两次得到的边号一致

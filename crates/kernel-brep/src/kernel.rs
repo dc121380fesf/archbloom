@@ -74,6 +74,20 @@ impl BrepKernel {
     pub fn add_cylinder(&mut self, base: Point3, r: f64, h: f64, segments: usize) -> SolidId {
         self.insert(cylinder_solid(base, r, h, segments))
     }
+
+    /// 列出实体所有边：边号、两端点、长度、相邻面、两面夹角。
+    ///
+    /// 这是倒角的“选边”前提：agent 先查这里，筛出要倒的边，再把边号传给
+    /// [`GeometryKernel::chamfer`]。
+    ///
+    /// **边号会随几何运算失效**（顶点重编号），查完就应立即使用。
+    pub fn edges(&self, id: SolidId) -> Result<Vec<crate::edges::EdgeInfo>, KernelError> {
+        let s = self
+            .solids
+            .get(&id)
+            .ok_or(KernelError::UnknownSolid { id })?;
+        crate::edges::list_edges(s)
+    }
 }
 
 impl Default for BrepKernel {
@@ -222,8 +236,7 @@ impl GeometryKernel for BrepKernel {
         edges: &[EdgeId],
         width: f64,
         cancel: &CancelToken,
-    ) -> Result<SolidId, KernelError> {
-        if cancel.is_cancelled() {
+    ) -> Result<SolidId, KernelError> {        if cancel.is_cancelled() {
             return Err(KernelError::Unsupported {
                 feature: "chamfer（已取消）",
                 alternatives: vec!["重新发起一次倒角"],

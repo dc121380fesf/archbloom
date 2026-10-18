@@ -136,6 +136,7 @@ name = "archcore-kernel-brep"
 version = "0.3.0"
 dependencies = [
  "archcore-kernel",
+ "serde",
 ]
 
 [[package]]
