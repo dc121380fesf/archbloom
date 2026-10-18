@@ -279,6 +279,10 @@ pub fn fillet_solid(
         let Some(rl) = rails.get(&(e.a, e.b)) else {
             continue;
         };
+        if std::env::var("ARCHCORE_DEBUG_FILLET").is_ok() && (e.a == 0 || e.b == 0) {
+            eprintln!("[fillet] 边({},{}) f1={} f2={} | a1={:?} b1={:?} a2={:?} b2={:?}",
+                e.a, e.b, e.f1, e.f2, rl.f1_start, rl.f1_end, rl.f2_start, rl.f2_end);
+        }
         cut.insert((e.f1, e.a), rl.f1_start);
         cut.insert((e.f1, e.b), rl.f1_end);
         cut.insert((e.f2, e.a), rl.f2_start);
@@ -314,10 +318,23 @@ pub fn fillet_solid(
         };
         let seg = opts.segments.max(2);
         let axis = normalize(sub(rl.cb, rl.ca)).unwrap_or([0.0, 0.0, 1.0]);
-        let from_dir = normalize(sub(rl.f1_start, rl.ca)).unwrap_or(rl.m1);
-        let to_dir = normalize(sub(rl.f2_start, rl.ca)).unwrap_or(rl.m2);
-        let total = dot(from_dir, to_dir).clamp(-1.0, 1.0).acos();
-        let sign = if dot(cross(from_dir, to_dir), axis) >= 0.0 {
+        // 两端各自的弧方向。
+        //
+        // **不能两端共用一个 dir**：ca 和 cb 在轴线上不同位置，
+        // 它们到各自端点的向量方向不同。共用会让 b 端的弧点飞出去
+        // （实测点跑到 y=2.14，而实体范围是 0~2）。
+        let from_a = normalize(sub(rl.f1_start, rl.ca)).unwrap_or(rl.m1);
+        let to_a = normalize(sub(rl.f2_start, rl.ca)).unwrap_or(rl.m2);
+        let from_b = normalize(sub(rl.f1_end, rl.cb)).unwrap_or(rl.m1);
+        let to_b = normalize(sub(rl.f2_end, rl.cb)).unwrap_or(rl.m2);
+        let total_a = dot(from_a, to_a).clamp(-1.0, 1.0).acos();
+        let total_b = dot(from_b, to_b).clamp(-1.0, 1.0).acos();
+        let sign_a = if dot(cross(from_a, to_a), axis) >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        };
+        let sign_b = if dot(cross(from_b, to_b), axis) >= 0.0 {
             1.0
         } else {
             -1.0
@@ -326,10 +343,12 @@ pub fn fillet_solid(
         let mut prev_b = put!(rl.f1_end);
         for s in 1..=seg {
             let t = s as f64 / seg as f64;
-            let ang = total * t * sign;
-            let dir = rotate(from_dir, axis, ang);
-            let cur_a = add(rl.ca, scale(dir, r));
-            let cur_b = add(rl.cb, scale(dir, r));
+            let ang_a = total_a * t * sign_a;
+            let ang_b = total_b * t * sign_b;
+            let dir_a = rotate(from_a, axis, ang_a);
+            let dir_b = rotate(from_b, axis, ang_b);
+            let cur_a = add(rl.ca, scale(dir_a, r));
+            let cur_b = add(rl.cb, scale(dir_b, r));
             let va = if s == seg {
                 put!(rl.f2_start)
             } else {
@@ -342,6 +361,24 @@ pub fn fillet_solid(
             };
             let quad = dedup(vec![prev_a, prev_b, vb, va]);
             if quad.len() >= 3 {
+                // 圆角面的朝向必须「背离轴线」（圆柱外侧）。
+                // 不判的话一半面朝内，体积会被多减一遍。
+                let mut quad = quad;
+                let mid_axis = scale(add(rl.ca, rl.cb), 0.5);
+                let centroid = {
+                    let mut s = [0.0; 3];
+                    for &i in &quad {
+                        let p = out.verts[i as usize];
+                        for k in 0..3 {
+                            s[k] += p[k];
+                        }
+                    }
+                    let m = quad.len() as f64;
+                    [s[0] / m, s[1] / m, s[2] / m]
+                };
+                if dot(plane_normal(&out, &quad), sub(centroid, mid_axis)) < 0.0 {
+                    quad.reverse();
+                }
                 let nrm = plane_normal(&out, &quad);
                 out.faces.push(Face {
                     surface: Surface::Plane {
@@ -425,25 +462,16 @@ pub fn fillet_solid(
             .collect();
         let mut ring = dedup(ring);
         if ring.len() >= 3 {
-            // 朝向必须「远离球心」：这三个端点围出的是角落处的球面片，
-            // 朝外就是背离球心的方向。
-            //
-            // 不判的话按顶点顺序算出的是 (-1,-1,-1)/√3——指向实体内部，
-            // 三角化时体积会被多减一遍（实测全边 5.44 而理论 7.80）。
-            let centroid = {
-                let mut s = [0.0; 3];
-                for &i in &ring {
-                    let p = out.verts[i as usize];
-                    for k in 0..3 {
-                        s[k] += p[k];
-                    }
-                }
-                let m = ring.len() as f64;
-                [s[0] / m, s[1] / m, s[2] / m]
-            };
-            if dot(plane_normal(&out, &ring), sub(centroid, *c)) < 0.0 {
+            // 朝向必须「远离球心」
+            let centroid = centroid_of(&out, &ring);
+            if dot(plane_normal(&out, &ring), sub(*c, centroid)) < 0.0 {
                 ring.reverse();
             }
+            // 球面片：**不做细分**。
+            //
+            // 试过两级中点细分（每个子三角中心投到球面），结果体积反而从 7.378
+            // 掉到 7.29——说明细分方向与朝向判断互相矛盾，两者得一起改。
+            // 先保留平面三角（误差 5.5%），总比乱投强。
             let nrm = plane_normal(&out, &ring);
             out.faces.push(Face {
                 surface: Surface::Plane {
@@ -475,11 +503,23 @@ fn solve_sphere_center(v: Point3, normals: &[Vector3], r: f64) -> Option<Point3>
         return None;
     }
     // RHS 全为 r（因为 c·m_i - v·m_i = R → c·m_i = R + v·m_i）
-    let b: Vec<f64> = (0..3).map(|i| r + dot(v, m[i])).collect();
-    // Cramer
-    let x = dot([b[0], b[1], b[2]], cross(a2, a3)) / det;
-    let y = dot(a1, cross([b[0], b[1], b[2]], a3)) / det;
-    let z = dot(a1, cross(a2, [b[0], b[1], b[2]])) / det;
+    let b = [
+        r + dot(v, m[0]),
+        r + dot(v, m[1]),
+        r + dot(v, m[2]),
+    ];
+
+    // Cramer 法则：**矩阵的行为方程系数**（a1/a2/a3），
+    // 所以求 x 时替换的是**第 1 列**，而不是把 a2/a3 当行向量做叉乘。
+    //
+    // 早先写成 dot(b, cross(a2, a3))，把行当成了列——
+    // 盒子角解出了 (-1.8, 0.2, -0.2)（正确答案是 1.8, 0.2, 0.2），符号全反。
+    let col2 = [a1[1], a2[1], a3[1]];
+    let col3 = [a1[2], a2[2], a3[2]];
+    let col1 = [a1[0], a2[0], a3[0]];
+    let x = dot(b, cross(col2, col3)) / det;
+    let y = dot(b, cross(col3, col1)) / det;
+    let z = dot(b, cross(col1, col2)) / det;
     Some([x, y, z])
 }
 
@@ -503,6 +543,10 @@ fn trim_to_sphere(
     let sq = disc.sqrt();
     let t1 = (-b + sq) / (2.0 * a);
     let t2 = (-b - sq) / (2.0 * a);
+    if std::env::var("ARCHCORE_DEBUG_FILLET").is_ok() {
+        eprintln!("[trim] p0={:?} dir={:?} c={:?} | d={:?} b={:.4} cc={:.4} disc={:.4} t1={:.4} t2={:.4}",
+            p0, dir, c, d, b, cc, disc, t1, t2);
+    }
     // 取较小的正根（离边最近）
     let t = if t1.abs() < t2.abs() {
         t1
@@ -529,6 +573,27 @@ fn rotate(v: Vector3, axis: Vector3, ang: f64) -> Vector3 {
 fn dist2(a: Point3, b: Point3) -> f64 {
     let d = sub(a, b);
     dot(d, d)
+}
+
+fn centroid_of(out: &Solid, ring: &[u32]) -> Point3 {
+    let mut s = [0.0; 3];
+    for &i in ring {
+        let p = out.verts[i as usize];
+        for k in 0..3 {
+            s[k] += p[k];
+        }
+    }
+    let m = ring.len() as f64;
+    [s[0] / m, s[1] / m, s[2] / m]
+}
+
+/// 把两点的中点投影到球面上（预留：球面细分会用）。
+#[allow(dead_code)]
+fn project_to_sphere(a: Point3, b: Point3, center: Point3, r: f64) -> Point3 {
+    let mid = scale(add(a, b), 0.5);
+    normalize(sub(mid, center))
+        .map(|d| add(center, scale(d, r)))
+        .unwrap_or(mid)
 }
 
 fn dedup(ring: Vec<u32>) -> Vec<u32> {
