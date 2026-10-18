@@ -1,7 +1,11 @@
-//! Archbloom 工作台壳：文档模型（新建 / 打开 / 保存 / 另存为 / 导出）+ 高保真视口 + 出图面板
+//! Archbloom 工作台壳：文档模型（新建 / 打开 / 保存 / 另存为 / 导出）+ 高保真视口 + 出图面板 + 零件工作台
 //!
 //! 文档模型：后端持有「当前文档」状态（路径 + 场景），前端只做展示与命令派发。
 //! 文件对话框一律由 Rust 侧通过 tauri-plugin-dialog 弹出（前端是纯静态页，不引 npm 包）。
+//!
+//! 两条平行的工作流：
+//! - **建筑场景**（`DocState`）：语义模型，墙/板/柱 → 渲染 → 出图
+//! - **零件工作台**（`part::PartState`）：精确 B-rep，盒子/圆柱 → 布尔/倒角/合并 → STEP
 use archcore_ir::{Scene, Units, UpAxis};
 use base64::Engine as _;
 use serde_json::{json, Value};
@@ -9,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{command, Manager, State};
 use tauri_plugin_dialog::DialogExt;
+
+mod part;
 
 /// 当前打开的文档
 struct DocState {
@@ -697,6 +703,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Mutex::new(DocState::default()))
+        .manage(part::PartState::default())
         .on_window_event(|window, event| {
             // 关窗前拦一道：有未保存内容就弹确认（确认后才真关）
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -735,7 +742,12 @@ fn main() {
             read_scene,
             read_texture,
             render_scene,
-            doc_info
+            doc_info,
+            part::part_new,
+            part::part_drill,
+            part::part_merge,
+            part::part_export_step,
+            part::part_reset
         ])
         .run(tauri::generate_context!())
         .expect("archbloom-app 启动失败");

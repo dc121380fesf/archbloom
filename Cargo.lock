@@ -77,6 +77,8 @@ version = "0.4.3"
 dependencies = [
  "archcore-io",
  "archcore-ir",
+ "archcore-kernel",
+ "archcore-kernel-brep",
  "archcore-render",
  "base64 0.22.1",
  "serde",

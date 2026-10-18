@@ -13,6 +13,8 @@ serde.workspace = true
 serde_json.workspace = true
 archcore-ir = { path = "../../crates/ir" }
 archcore-io = { path = "../../crates/io" }
+archcore-kernel = { path = "../../crates/kernel" }
+archcore-kernel-brep = { path = "../../crates/kernel-brep" }
 archcore-render = { path = "../../crates/render", features = ["gpu"] }
 base64 = "0.22"
 tauri-plugin-dialog = "2.8.3"

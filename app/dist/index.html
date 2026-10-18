@@ -57,6 +57,23 @@
   button:hover { background: #2f6fe0; }
   button:disabled { background: #2c3442; cursor: wait; }
   #presult { font: 11px ui-monospace, monospace; opacity: .85; word-break: break-all; min-height: 30px; }
+  #part { position: fixed; top: 72px; left: 12px; width: 250px; z-index: 20;
+    background: rgba(20,24,32,.9); border: 1px solid #2a3140; border-radius: 10px;
+    padding: 12px 14px; backdrop-filter: blur(6px); display: grid; gap: 9px; }
+  #part h3 { margin: 0; font-size: 13px; }
+  #part .sub { font-size: 10px; opacity: .5; margin-top: -5px; }
+  #part label { display: grid; gap: 3px; font-size: 11px; opacity: .8; }
+  #part input, #part select { background: #0e1117; color: #dfe3ea; border: 1px solid #2c3442;
+    border-radius: 6px; padding: 5px 7px; font: 12px system-ui; width: 100%; }
+  #part .row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  #part .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
+  #part button { padding: 6px 10px; font-size: 12px; }
+  #part button.sec { background: #232a36; }
+  #part button.sec:hover { background: #2c3543; }
+  #pinfo { font: 11px ui-monospace, monospace; opacity: .85; line-height: 1.6;
+    border-top: 1px solid #2a3140; padding-top: 8px; white-space: pre-wrap; }
+  #pinfo b { color: #7dd3a0; font-weight: 600; }
+  #pinfo .bad { color: #f08a8a; }
   #hint { position: fixed; bottom: 12px; left: 14px; opacity: .55; z-index: 10; }
 </style>
 </head>
@@ -133,6 +150,44 @@
   </label>
   <button id="shot">出图</button>
   <div id="presult">就绪。产物落在文档旁。</div>
+</div>
+
+<div id="part">
+  <h3>零件工作台</h3>
+  <div class="sub">精确 B-rep · 可出 STEP</div>
+  <div class="row">
+    <label>类型
+      <select id="pkind">
+        <option value="box">盒子</option>
+        <option value="cylinder">圆柱</option>
+      </select>
+    </label>
+    <label>&nbsp;
+      <button id="pnew">新建</button>
+    </label>
+  </div>
+  <div id="pbox">
+    <div class="row3">
+      <label>长 mm<input id="pdx" type="number" value="20" step="1"></label>
+      <label>宽 mm<input id="pdy" type="number" value="20" step="1"></label>
+      <label>高 mm<input id="pdz" type="number" value="5" step="1"></label>
+    </div>
+  </div>
+  <div id="pcyl" hidden>
+    <div class="row">
+      <label>直径 mm<input id="pdia" type="number" value="10" step="1"></label>
+      <label>高 mm<input id="phgt" type="number" value="20" step="1"></label>
+    </div>
+  </div>
+  <div class="row">
+    <label>孔径 mm<input id="phole" type="number" value="10" step="1"></label>
+    <label>&nbsp;<button id="pdrill" class="sec">打孔</button></label>
+  </div>
+  <div class="row">
+    <button id="pmerge" class="sec">合并面片</button>
+    <button id="pstep" class="sec">导出 STEP</button>
+  </div>
+  <div id="pinfo">尚未创建零件</div>
 </div>
 
 <div id="hint">拖动旋转 · 滚轮缩放 · 右键平移</div>
@@ -496,6 +551,78 @@ document.getElementById('shot').onclick = async () => {
   await renderRecent();
   refreshView();
   render();
+})();
+
+// ─── 零件工作台 ───
+// 与建筑场景平行：左边这栏走 B-rep 内核，输出的是精确几何与 STEP。
+(function partWorkbench() {
+  const $ = (id) => document.getElementById(id);
+  const info = $('pinfo');
+  let busy = false;
+
+  const kindSel = $('pkind');
+  kindSel.onchange = () => {
+    const isBox = kindSel.value === 'box';
+    $('pbox').hidden = !isBox;
+    $('pcyl').hidden = isBox;
+  };
+
+  function showInfo(d) {
+    if (!d) { info.textContent = '尚未创建零件'; return }
+    const wt = d.watertight
+      ? '<b>水密 ✓</b>'
+      : `<span class="bad">不水密（边界边 ${d.boundaryHalfEdges}）</span>`;
+    info.innerHTML =
+      `<b>${d.label}</b>  ·  ${d.step}\n` +
+      `面 ${d.faces}   边 ${d.edges}   顶点 ${d.verts}\n` +
+      `体积 ${d.volumeMm3.toFixed(3)} mm³\n` +
+      `尺寸 ${d.sizeMm.map((v) => v.toFixed(1)).join(' × ')} mm\n` +
+      `欧拉 ${d.euler}   ${wt}\n` +
+      `带洞面 ${d.holedFaces}   曲面 ${d.curvedFaces}`;
+  }
+
+  async function run(fn, label) {
+    if (!invoke) { info.textContent = 'Tauri 全局未注入'; return }
+    if (busy) return;
+    busy = true;
+    info.textContent = label + '…';
+    try {
+      const d = await fn();
+      showInfo(d);
+    } catch (e) {
+      info.innerHTML = `<span class="bad">${String(e)}</span>`;
+    } finally {
+      busy = false;
+    }
+  }
+
+  $('pnew').onclick = () => {
+    const kind = kindSel.value;
+    const params = kind === 'box'
+      ? [$('pdx').value, $('pdy').value, $('pdz').value].map(Number)
+      : [$('pdia').value, $('phgt').value].map(Number);
+    if (params.some((v) => !(v > 0))) { info.textContent = '尺寸要大于 0'; return }
+    run(() => invoke('part_new', { kind, params }), '新建');
+  };
+
+  $('pdrill').onclick = () => {
+    const diameter = Number($('phole').value);
+    if (!(diameter > 0)) { info.textContent = '孔径要大于 0'; return }
+    run(() => invoke('part_drill', { diameter, depth: 1000 }), '打孔');
+  };
+
+  $('pmerge').onclick = () => run(() => invoke('part_merge'), '合并面片');
+
+  $('pstep').onclick = async () => {
+    if (!invoke) return;
+    try {
+      const r = await invoke('part_export_step', { name: '' });
+      if (r.cancelled) return;
+      info.innerHTML += `\n导出 ${r.path}\n${r.bytes} 字节`;
+    } catch (e) {
+      info.innerHTML = `<span class="bad">${String(e)}</span>`;
+    }
+  };
 })();
 </script>
 </body>
