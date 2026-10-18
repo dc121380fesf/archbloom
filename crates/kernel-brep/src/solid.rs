@@ -38,6 +38,15 @@ pub struct Face {
     pub holes: Vec<Vec<u32>>,
 }
 
+impl Face {
+    /// 遍历这个面的所有环（外环在前，然后各个洞）。
+    ///
+    /// 拓扑检查（水密、欧拉、边计数）都必须走这里，只看 `verts` 会把洞的边漏掉。
+    pub fn all_rings(&self) -> impl Iterator<Item = &Vec<u32>> {
+        std::iter::once(&self.verts).chain(self.holes.iter())
+    }
+}
+
 /// 实体：顶点池 + 面表。
 ///
 /// 边表暂不单列——D 阶段的拓扑检查（水密、欧拉公式）只需要顶点/面。
@@ -84,37 +93,46 @@ impl Solid {
     }
 
     /// 是否水密：每条无向边恰好被两个面共享。
+    ///
+    /// **内环（洞）的边也要算**。合并共面面片之后，顶面的内圆边只出现在 `holes` 里，
+    /// 只看 `verts` 会把这些边当成孤立边，误报「不水密」。
     pub fn is_watertight(&self) -> bool {
         use std::collections::HashMap;
         let mut edges: HashMap<(u32, u32), u32> = HashMap::new();
         for f in &self.faces {
-            let n = f.verts.len();
-            if n < 3 {
-                return false;
-            }
-            for i in 0..n {
-                let a = f.verts[i];
-                let b = f.verts[(i + 1) % n];
-                if a == b {
+            for ring in f.all_rings() {
+                let n = ring.len();
+                if n < 3 {
                     return false;
                 }
-                let k = if a < b { (a, b) } else { (b, a) };
-                *edges.entry(k).or_insert(0) += 1;
+                for i in 0..n {
+                    let a = ring[i];
+                    let b = ring[(i + 1) % n];
+                    if a == b {
+                        return false;
+                    }
+                    let k = if a < b { (a, b) } else { (b, a) };
+                    *edges.entry(k).or_insert(0) += 1;
+                }
             }
         }
         !edges.is_empty() && edges.values().all(|c| *c == 2)
     }
 
-    /// 欧拉示性数 V − E + F。闭合单连通实体应为 2。
+    /// 欧拉示性数 V − E + F。
+    ///
+    /// 闭合单连通实体为 2；带 g 个通孔的实体为 2 − 2g（开孔板带一个通孔 → 0）。
     pub fn euler_characteristic(&self) -> i64 {
         use std::collections::HashSet;
         let mut edges: HashSet<(u32, u32)> = HashSet::new();
         for f in &self.faces {
-            let n = f.verts.len();
-            for i in 0..n {
-                let a = f.verts[i];
-                let b = f.verts[(i + 1) % n];
-                edges.insert(if a < b { (a, b) } else { (b, a) });
+            for ring in f.all_rings() {
+                let n = ring.len();
+                for i in 0..n {
+                    let a = ring[i];
+                    let b = ring[(i + 1) % n];
+                    edges.insert(if a < b { (a, b) } else { (b, a) });
+                }
             }
         }
         self.verts.len() as i64 - edges.len() as i64 + self.faces.len() as i64

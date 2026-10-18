@@ -135,11 +135,15 @@ pub fn merge_coplanar(solid: &Solid) -> Result<(Solid, MergeStats), KernelError>
             slots[i].as_ref().unwrap().face.clone(),
             slots[j].as_ref().unwrap().face.clone(),
         );
-        let Some(new_face) = try_splice(solid, &fi, &fj) else {
+        // 法线必须用**这两个面自己**的，不能拿面 0 的（否则二维投影基全错）
+        let nrm = fi
+            .surface
+            .normal_at(solid.verts[fi.verts[0] as usize])
+            .unwrap_or([0.0, 0.0, 1.0]);
+        let Some(new_face) = try_splice(solid, &fi, &fj, nrm) else {
             continue;
         };
-        let normal = face_normal(solid, 0);
-        let area = poly_area(solid, &new_face.verts, &new_face.holes, normal);
+        let area = poly_area(solid, &new_face.verts, &new_face.holes, nrm);
         let expect = slots[i].as_ref().unwrap().area + slots[j].as_ref().unwrap().area;
         if (area - expect).abs() > expect.max(1e-18) * 1e-6 + 1e-18 {
             continue;
@@ -232,7 +236,17 @@ pub fn merge_coplanar(solid: &Solid) -> Result<(Solid, MergeStats), KernelError>
 }
 
 /// 尝试沿共享边拼接两个面。失败返回 None（不改变任何东西）。
-fn try_splice(_solid: &Solid, a: &Face, b: &Face) -> Option<Face> {
+///
+/// # 带洞拼接
+///
+/// 拼接后如果环里出现重复顶点，说明两段路径**首尾相遇**。这有两种可能：
+///
+/// * **形成洞**：分出的两个环一个完全包含另一个（开孔板顶面的最终形态）；
+/// * **自交**：两个环交叉（拼错了，必须拒掉）。
+///
+/// 早期版本一律当自交拒掉，所以顶面只能拼成留缝的 C 形大环（534 面而非 ~70）。
+/// 现在用「包含性测试」区分：小环所有顶点都在大环内部 → 当作洞接受。
+fn try_splice(solid: &Solid, a: &Face, b: &Face, normal: Vector3) -> Option<Face> {
     // 找共享边：a 有向边 (x→y)，b 必须是 (y→x)
     let ra = &a.verts;
     let rb = &b.verts;
@@ -240,7 +254,6 @@ fn try_splice(_solid: &Solid, a: &Face, b: &Face) -> Option<Face> {
     for ia in 0..ka {
         let x = ra[ia];
         let y = ra[(ia + 1) % ka];
-        // b 里找 y→x
         let kb = rb.len();
         let mut ib = None;
         for j in 0..kb {
@@ -251,46 +264,117 @@ fn try_splice(_solid: &Solid, a: &Face, b: &Face) -> Option<Face> {
         }
         let Some(ib) = ib else { continue };
 
-        // 拼：从 a 的 y 出发绕到 x（不含 x），再接 b 从 x 绕到 y（不含 y）
+        // 拼：从 a 的 y 绕到 x（不含 x），再接 b 从 x 绕到 y（不含 y）
         let mut ring: Vec<u32> = Vec::with_capacity(ka + kb);
-        // a: y .. a 末尾 .. a 开头 .. x 之前
         let mut k = (ia + 1) % ka;
         while ra[k] != x {
             ring.push(ra[k]);
             k = (k + 1) % ka;
         }
-        // 此时 ra[k] == x
-        // b: x 之后 .. b 末尾 .. b 开头 .. y 之前
         let mut m = (ib + 1) % kb;
         while rb[m] != y {
             ring.push(rb[m]);
             m = (m + 1) % kb;
         }
-
         if ring.len() < 3 {
             return None;
         }
 
-        // 只在**没有洞**的情形下拼接（带洞面拼接属未支持场景，宁可不合）
+        // 带洞面不参与拼接（简化：洞的合并需要另一套边界匹配）
         if !a.holes.is_empty() || !b.holes.is_empty() {
             return None;
         }
 
-        // 校验：新环自身不能有重复顶点（自交的典型征兆）
-        let mut seen: HashMap<u32, ()> = HashMap::new();
-        for &v in &ring {
-            if seen.insert(v, ()).is_some() {
-                return None;
+        // 找重复顶点
+        let mut seen: HashMap<u32, usize> = HashMap::new();
+        let mut dup: Option<(usize, usize)> = None;
+        for (i, &v) in ring.iter().enumerate() {
+            if let Some(&p) = seen.get(&v) {
+                dup = Some((p, i));
+                break;
             }
+            seen.insert(v, i);
+        }
+
+        let Some((p1, p2)) = dup else {
+            return Some(Face {
+                surface: a.surface,
+                verts: ring,
+                holes: Vec::new(),
+            });
+        };
+
+        // 分成两环
+        let ring_a: Vec<u32> = ring[p1..p2].to_vec();
+        let mut ring_b: Vec<u32> = ring[p2..].to_vec();
+        ring_b.extend_from_slice(&ring[..p1]);
+        if ring_a.len() < 3 || ring_b.len() < 3 {
+            return None;
+        }
+
+        // 投影到面内二维，判断包含关系
+        let (u, w) = crate::geom::orthonormal_basis(normal)?;
+        let origin = solid.verts[ring_a[0] as usize];
+        let to2 = |i: u32| -> [f64; 2] {
+            let d = sub(solid.verts[i as usize], origin);
+            [dot(d, u), dot(d, w)]
+        };
+        let pa2: Vec<[f64; 2]> = ring_a.iter().map(|&i| to2(i)).collect();
+        let pb2: Vec<[f64; 2]> = ring_b.iter().map(|&i| to2(i)).collect();
+        let aa = poly_area2(&pa2).abs();
+        let ab = poly_area2(&pb2).abs();
+        if aa <= 0.0 || ab <= 0.0 {
+            return None;
+        }
+
+        let (outer, inner, inner2) = if aa > ab {
+            (ring_a, ring_b, pb2)
+        } else {
+            (ring_b, ring_a, pa2)
+        };
+        let outer2: Vec<[f64; 2]> = outer.iter().map(|&i| to2(i)).collect();
+
+        // 小环必须完全在大环内部，否则是自交
+        if !inner2.iter().all(|&p| point_in_poly(p, &outer2)) {
+            return None;
         }
 
         return Some(Face {
             surface: a.surface,
-            verts: ring,
-            holes: Vec::new(),
+            verts: outer,
+            holes: vec![inner],
         });
     }
     None
+}
+
+fn poly_area2(poly: &[[f64; 2]]) -> f64 {
+    let n = poly.len();
+    let mut s = 0.0;
+    for i in 0..n {
+        let a = poly[i];
+        let b = poly[(i + 1) % n];
+        s += a[0] * b[1] - b[0] * a[1];
+    }
+    s * 0.5
+}
+
+/// 点在多边形内（射线法，含边界）。
+fn point_in_poly(p: [f64; 2], poly: &[[f64; 2]]) -> bool {
+    let n = poly.len();
+    let mut inside = false;
+    for i in 0..n {
+        let a = poly[i];
+        let b = poly[(i + 1) % n];
+        if (a[1] > p[1]) != (b[1] > p[1]) {
+            let t = (p[1] - a[1]) / (b[1] - a[1]);
+            let x = a[0] + t * (b[0] - a[0]);
+            if p[0] < x {
+                inside = !inside;
+            }
+        }
+    }
+    inside
 }
 
 /// 曲面分组键：把浮点量化成整数。
