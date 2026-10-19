@@ -115,6 +115,8 @@ pub fn edge_table(solid: &Solid) -> Result<Vec<EdgeRec>, KernelError> {
     }
 
     let mut out = Vec::with_capacity(map.len());
+    // 锐边阈值从 [`crate::blend::ChamferOptions`] 取，不在这里再写死一个数。
+    let threshold = crate::blend::ChamferOptions::default().angle_threshold_deg;
     for ((a, b), faces) in map {
         if faces.len() != 2 {
             return Err(KernelError::TopologyBroken {
@@ -135,7 +137,7 @@ pub fn edge_table(solid: &Solid) -> Result<Vec<EdgeRec>, KernelError> {
             b,
             f1,
             f2,
-            sharp: ang > 30.0,
+            sharp: ang > threshold,
             angle_deg: ang,
         });
     }

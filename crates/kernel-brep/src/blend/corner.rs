@@ -101,6 +101,9 @@ pub(super) fn corner_blend(
                 cur_end = segs[k].to;
             }
         }
+        if std::env::var("ARCHCORE_DEBUG_CORNER").is_ok() && (!ok || cur_end != segs[0].from) {
+            eprintln!("  ✗ 串环失败 v={v} ok={ok} cur_end={cur_end} want={}", segs[0].from);
+        }
         if !ok || cur_end != segs[0].from {
             continue;
         }
