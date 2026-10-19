@@ -29,6 +29,7 @@
 //! [`crate::kernel`] 里 `fillet` 的自检。
 
 pub mod chamfer;
+mod corner;
 pub mod fillet;
 
 pub use chamfer::{chamfer_solid, ChamferOptions};

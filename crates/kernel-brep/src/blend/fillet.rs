@@ -457,140 +457,9 @@ pub fn fillet_solid(
 
     // 3c) 角部：球面片
     //
-    // 边界不是「几个轨线端点连成的平面三角」，而是**沿端圆弧走**的球面多边形。
-    //
-    // 链路：球面(c,R) ∩ 柱面(轴过 c，R) 的联立
-    //     (p-c)² = R²、 (p-c)² - ((p-c)·d)² = R²
-    // 相减得 (p-c)·d = 0 —— 交线就是球面上**垂直于棱方向的大圆**，
-    // 而大圆同时也就是圆角面的端圆。两者是同一条曲线，所以自然共享。
-    //
-    // 每个顶点周围有 3 条棱（盒子），每条棱贡献一段端圆弧（seg 段），
-    // 三段弧首尾相接就是这个角部面的边界。
-    for (&v, (c, _faces_at_v)) in &spheres {
-        // 收集绕这个顶点、已被圆角的面之间的弧段。
-        // 每条棱（选中）在 v 处贡献一段弧：从 (f1, v) 到 (f2, v)。
-        // 需要把弧段串成环：弧的起点/终点就是 corner_idx 里的端点索引。
-        struct ArcSeg {
-            pts: Vec<u32>,
-            from: u32,
-            to: u32,
-        }
-        let mut segs: Vec<ArcSeg> = Vec::new();
-        for (i, e) in table.iter().enumerate() {
-            if !selected[i] || (e.a != v && e.b != v) {
-                continue;
-            }
-            let at_b = e.b == v;
-            let Some(chain) = arcs.get(&(e.a, e.b, at_b)) else {
-                continue;
-            };
-            if chain.len() < 2 {
-                continue;
-            }
-            let from = *chain.first().unwrap();
-            let to = *chain.last().unwrap();
-            segs.push(ArcSeg {
-                pts: chain.clone(),
-                from,
-                to,
-            });
-        }
-        if std::env::var("ARCHCORE_DEBUG_CORNER").is_ok() {
-            eprintln!("[corner] v={v} segs={} faces_at_v={:?}", segs.len(), _faces_at_v);
-            for (k, s) in segs.iter().enumerate() {
-                eprintln!("  seg{k} pts={} from={} to={}", s.pts.len(), s.from, s.to);
-            }
-        }
-        if segs.len() < 3 {
-            continue;
-        }
-        // 串环：从第一条弧开始，每次找「一端等于当前终点」的下一条。
-        //
-        // **必须允许反向使用**：每条端圆的走向由叉积符号决定，
-        // 三条弧不一定首尾同向（实测 seg0: 1→3、seg1: 1→13、seg2: 3→13，
-        // 全同向串不起来）。反向时把点列倒过来走就行。
-        let mut ring: Vec<u32> = Vec::new();
-        let mut used = vec![false; segs.len()];
-        let mut cur_end = segs[0].from;
-        let mut ok = true;
-        let mut first = true;
-        for _ in 0..segs.len() {
-            let Some(k) = segs
-                .iter()
-                .enumerate()
-                .position(|(j, s)| !used[j] && (s.from == cur_end || s.to == cur_end))
-            else {
-                ok = false;
-                break;
-            };
-            used[k] = true;
-            let rev = segs[k].to == cur_end && segs[k].from != cur_end;
-            // **第一条弧不能 skip**：它的首点就是环的起点。
-            // 之前一律 skip(1)，结果每个角部面都丢了一段弧的起点，
-            // 多边形在角点处断开一截——体积贡献只剩理论一半。
-            let skip = if first { 0 } else { 1 };
-            first = false;
-            if rev {
-                for &p in segs[k].pts.iter().rev().skip(skip) {
-                    if ring.last() != Some(&p) {
-                        ring.push(p);
-                    }
-                }
-                cur_end = segs[k].from;
-            } else {
-                for &p in segs[k].pts.iter().skip(skip) {
-                    if ring.last() != Some(&p) {
-                        ring.push(p);
-                    }
-                }
-                cur_end = segs[k].to;
-            }
-        }
-        if !ok || cur_end != segs[0].from {
-            continue;
-        }
-        // 环首尾重复去掉
-        if ring.len() > 1 && ring.first() == ring.last() {
-            ring.pop();
-        }
-        let mut ring = dedup(ring);
-        if ring.len() < 3 {
-            continue;
-        }
-        // 朝向：球面片必须**背离球心**。
-        //
-        // 原来用「投影累积 ccw」判：把环上相邻点的叉积投影到径向再累加。
-        // 对球面三角这种不共面的多边形，各项方向不一致、会互相抵消，
-        // 结果符号抖动——实测八个角部的体积贡献从 -0.004 到 +0.058，
-        // 本该全部同号。
-        //
-        // 改用「取头三个不共线点算平面法线，与径向比方向」。
-        // 这三个点必在同一段弧附近，共面性好，符号稳定。
-        let centroid = centroid_of(&out, &ring);
-        let radial = sub(centroid, *c);
-        let mut nrm_ref = [0.0, 0.0, 0.0];
-        for i in 1..ring.len().saturating_sub(1) {
-            let a = out.verts[ring[0] as usize];
-            let b = out.verts[ring[i] as usize];
-            let d = out.verts[ring[i + 1] as usize];
-            let cr = cross(sub(b, a), sub(d, a));
-            if (cr[0]*cr[0] + cr[1]*cr[1] + cr[2]*cr[2]).sqrt() > 1e-12 {
-                nrm_ref = cr;
-                break;
-            }
-        }
-        if dot(nrm_ref, radial) < 0.0 {
-            ring.reverse();
-        }
-        out.faces.push(Face {
-            surface: Surface::Sphere {
-                center: *c,
-                radius: r,
-            },
-            verts: ring,
-            holes: Vec::new(),
-        });
-    }
+    // 具体缝合逻辑已抽到 [`super::corner::corner_blend`]——因为倒角也有
+    // 同一件事（顶点处若干棱相交要补面），抽出来才能按选中棱数分类。
+    super::corner::corner_blend(&mut out, &table, &selected, &spheres, &arcs, r);
 
     out.analytic_volume = None;
     out.analytic_area = None;
@@ -697,7 +566,7 @@ fn dist2(a: Point3, b: Point3) -> f64 {
     dot(d, d)
 }
 
-fn centroid_of(out: &Solid, ring: &[u32]) -> Point3 {
+pub(super) fn centroid_of(out: &Solid, ring: &[u32]) -> Point3 {
     let mut s = [0.0; 3];
     for &i in ring {
         let p = out.verts[i as usize];
@@ -718,7 +587,7 @@ fn project_to_sphere(a: Point3, b: Point3, center: Point3, r: f64) -> Point3 {
         .unwrap_or(mid)
 }
 
-fn dedup(ring: Vec<u32>) -> Vec<u32> {
+pub(super) fn dedup(ring: Vec<u32>) -> Vec<u32> {
     let mut o: Vec<u32> = Vec::with_capacity(ring.len());
     for v in ring {
         if o.last() != Some(&v) {
