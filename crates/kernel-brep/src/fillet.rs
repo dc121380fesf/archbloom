@@ -559,20 +559,27 @@ pub fn fillet_solid(
         }
         // 朝向：球面片必须**背离球心**。
         //
-        // 不能用平面近似判（`plane_normal`）：球面多边形不共面，近似法线容易翻。
-        // 直接看环的走向——把环当成「从球心往外看」的投影，
-        // 逆时针才是朝外。用三个相邻点的叉积对径向投影判。
+        // 原来用「投影累积 ccw」判：把环上相邻点的叉积投影到径向再累加。
+        // 对球面三角这种不共面的多边形，各项方向不一致、会互相抵消，
+        // 结果符号抖动——实测八个角部的体积贡献从 -0.004 到 +0.058，
+        // 本该全部同号。
+        //
+        // 改用「取头三个不共线点算平面法线，与径向比方向」。
+        // 这三个点必在同一段弧附近，共面性好，符号稳定。
         let centroid = centroid_of(&out, &ring);
         let radial = sub(centroid, *c);
-        let mut ccw = 0.0;
-        for i in 0..ring.len() {
-            let a = out.verts[ring[i] as usize];
-            let b = out.verts[ring[(i + 1) % ring.len()] as usize];
-            // 投影到垂直于 radial 的平面上量有向面积
-            let cr = cross(sub(a, centroid), sub(b, centroid));
-            ccw += dot(cr, radial);
+        let mut nrm_ref = [0.0, 0.0, 0.0];
+        for i in 1..ring.len().saturating_sub(1) {
+            let a = out.verts[ring[0] as usize];
+            let b = out.verts[ring[i] as usize];
+            let d = out.verts[ring[i + 1] as usize];
+            let cr = cross(sub(b, a), sub(d, a));
+            if (cr[0]*cr[0] + cr[1]*cr[1] + cr[2]*cr[2]).sqrt() > 1e-12 {
+                nrm_ref = cr;
+                break;
+            }
         }
-        if ccw < 0.0 {
+        if dot(nrm_ref, radial) < 0.0 {
             ring.reverse();
         }
         out.faces.push(Face {

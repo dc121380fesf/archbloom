@@ -294,7 +294,7 @@ impl Solid {
     /// `tol` 用于 B-rep 后端的曲面细分；这里的面边界已经是离散折线，
     /// 所以容差只影响"这个实体是否已经够细"的判断，不做再细分（见 [`super::kernel`]）。
     pub fn triangulate(&self) -> (Vec<Point3>, Vec<Vector3>, Vec<u32>) {
-        let pos = self.verts.clone();
+        let mut pos = self.verts.clone();
         let mut nrm: Vec<Vector3> = vec![[0.0, 0.0, 0.0]; pos.len()];
         let mut idx: Vec<u32> = Vec::new();
 
@@ -314,8 +314,70 @@ impl Solid {
             // 三角化：简单面沿用扇形（快，且凸面结果一样）；
             // 带洞面必须走桥接 + 耳切，否则洞会被扇形剖分「填上」。
             if f.holes.is_empty() {
-                for i in 1..n - 1 {
-                    idx.extend_from_slice(&[f.verts[0], f.verts[i], f.verts[i + 1]]);
+                if let crate::geom::Surface::Sphere { center, radius } = &f.surface {
+                    // 球面片不能用纯扇形。
+                    //
+                    // 扇形从 ring[0] 拉出一排细长三角形，它们全是**弦平面**，
+                    // 内接在球面内侧，且弓高损失与「三角形的跨度」相关，
+                    // 与边界点多密无关——实测圆角盒子的球面片体积贡献
+                    // 0.218191，FreeCAD 是 0.234527，差 7%，且 seg 2→32 收敛不去。
+                    //
+                    // 每层把三角形拆四、新顶点投回球面，才真正贴向球面。
+                    let mut tris: Vec<[u32; 3]> = Vec::new();
+                    for i in 1..n - 1 {
+                        tris.push([f.verts[0], f.verts[i], f.verts[i + 1]]);
+                    }
+                    // 两层细分（边界点已有 seg 段，再细一层就够）
+                    for _ in 0..2 {
+                        let mut next: Vec<[u32; 3]> = Vec::new();
+                        for t in &tris {
+                            let a = pos[t[0] as usize];
+                            let b = pos[t[1] as usize];
+                            let c = pos[t[2] as usize];
+                            let mut mid = |p: Point3, q: Point3| -> u32 {
+                                let m = [
+                                    (p[0] + q[0]) * 0.5,
+                                    (p[1] + q[1]) * 0.5,
+                                    (p[2] + q[2]) * 0.5,
+                                ];
+                                let d = sub(m, *center);
+                                let l = dot(d, d).sqrt();
+                                let s = if l > 1e-15 { *radius / l } else { 1.0 };
+                                let on = [
+                                    center[0] + d[0] * s,
+                                    center[1] + d[1] * s,
+                                    center[2] + d[2] * s,
+                                ];
+                                // 复用已有点（避免顶点数爆）——扫一遍区间内的点
+                                for k in 0..n {
+                                    let v = pos[f.verts[k] as usize];
+                                    if (v[0] - on[0]).abs() < 1e-12
+                                        && (v[1] - on[1]).abs() < 1e-12
+                                        && (v[2] - on[2]).abs() < 1e-12
+                                    {
+                                        return f.verts[k];
+                                    }
+                                }
+                                pos.push(on);
+                                (pos.len() - 1) as u32
+                            };
+                            let ab = mid(a, b);
+                            let bc = mid(b, c);
+                            let ca = mid(c, a);
+                            next.push([t[0], ab, ca]);
+                            next.push([ab, t[1], bc]);
+                            next.push([ca, bc, t[2]]);
+                            next.push([ab, bc, ca]);
+                        }
+                        tris = next;
+                    }
+                    for t in tris {
+                        idx.extend_from_slice(&t);
+                    }
+                } else {
+                    for i in 1..n - 1 {
+                        idx.extend_from_slice(&[f.verts[0], f.verts[i], f.verts[i + 1]]);
+                    }
                 }
             } else {
                 let tris = crate::poly2d::triangulate_face(&self.verts, &f.verts, &f.holes, face_n);
@@ -335,6 +397,9 @@ impl Solid {
                     *slot = face_n;
                 }
             }
+        }
+        if nrm.len() < pos.len() {
+            nrm.resize(pos.len(), [0.0, 0.0, 0.0]);
         }
         (pos, nrm, idx)
     }
