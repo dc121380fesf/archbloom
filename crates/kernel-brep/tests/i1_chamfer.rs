@@ -98,7 +98,22 @@ fn i1_kernel_chamfer_capability_and_call() {
     let mut k = BrepKernel::new();
     let caps = k.capabilities();
     assert!(caps.chamfer, "brep 后端应申报 chamfer = true");
-    assert!(!caps.fillet, "fillet（圆弧过渡）尚未实现，必须报 false");
+    assert!(
+        caps.fillet,
+        "圆角已实现（角部球面片缝合），应报 true——报了就必须真能用，下面的调用会验"
+    );
+
+    // 申报了就得能跑：先验圆角真能出实体，且水密
+    let fbox = k.add_box([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+    let filleted = k
+        .fillet(fbox, &[], 0.05, &CancelToken::new())
+        .expect("申报 fillet = true 后，端口调用必须成功");
+    let ffacts = k.facts(filleted).expect("圆角实体应可查询");
+    assert!(ffacts.watertight, "圆角后必须水密");
+    println!(
+        "端口圆角: 面 {} 体积 {:.9}",
+        ffacts.face_count, ffacts.volume
+    );
 
     let id = k.add_box([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
     let out = k

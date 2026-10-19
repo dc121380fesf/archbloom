@@ -660,9 +660,21 @@ fn trim_to_sphere(
     let b = 2.0 * dot(d, dir);
     let cc = dot(d, d) - r * r;
     let disc = b * b - 4.0 * a * cc;
-    if disc < 0.0 {
+    // 判别式在这里**恒为 0**（重根），不是巧合：
+    //   |p0−c|² = 2R²　⇒　cc = R²
+    //   b = 2(p0−c)·dir = −2R　⇒　b² = 4R²
+    //   disc = 4R² − 4R² = 0
+    // 所以剩下的只有浮点误差。写 `disc < 0.0` 太硬：R 小的时候
+    // 相对误差更大，踩到 −1e-18 就直接返回 None，端点丢掉，
+    // 整个角部缝合崩掉。
+    //
+    // 实测表现：盒子 1m 边长时 R=0.1 能过、R=0.05 失败；
+    // 0.1m 边长时 R=0.01 能过、R=0.005 失败。
+    let eps = 1e-12 * (b * b).max(1e-30);
+    if disc < -eps {
         return None;
     }
+    let disc = disc.max(0.0);
     let sq = disc.sqrt();
     let t1 = (-b + sq) / (2.0 * a);
     let t2 = (-b - sq) / (2.0 * a);

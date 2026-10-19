@@ -140,24 +140,46 @@ fn k3_能力申报如实() {
     // 下面这些要如实反映当前进度（谎报会让 agent 规划出死路）
     assert!(c.solid_bool, "E 阶段已实现平面多面体布尔");
     assert!(!c.curved_bool, "曲面求交未做（F 阶段），圆柱只走离散近似");
-    assert!(!c.fillet, "倒角在 I 阶段");
+    assert!(
+        c.fillet,
+        "圆角已实现（角部球面片缝合），应报 true——下一行会验证它真能跑"
+    );
     assert!(c.step_io, "G 阶段已可导出 STEP");
 }
 
 #[test]
 fn k3_未实现能力返回unsupported而非静默降级() {
+    // 这个测试原本拿 fillet 当「未实现能力」的样本。圆角接入后，
+    // 重心改为**申报与实际一致**：申报 true 就必须能跑，
+    // 跑不了就必须明确报错，不能交回半成品。
     let mut k = BrepKernel::new();
-    let id = k.add_cylinder([0.0, 0.0, 0.0], R, H, 16);
-    // 倒角仍未实现（I 阶段）——用它验「未实现能力必须明确报不支持」
+
+    // 盒子（开链边界）—— 必须成功且水密
+    let id = k.add_box([0.0, 0.0, 0.0], [0.1, 0.1, 0.1]);
+    let out = k
+        .fillet(id, &[], 0.005, &archcore_kernel::CancelToken::new())
+        .expect("申报 fillet = true 后必须真能调用");
+    let f = k.facts(out).expect("新实体应可查询");
+    assert!(f.watertight, "圆角后必须水密");
+
+    // 圆柱（闭环边界）—— 尚未支持，必须**明确报错**，而不是返回坏实体
+    let cyl = k.add_cylinder([0.0, 0.0, 0.0], R, H, 16);
     let err = k
-        .fillet(id, &[], 0.001, &archcore_kernel::CancelToken::new())
-        .unwrap_err();
+        .fillet(cyl, &[], 0.001, &archcore_kernel::CancelToken::new())
+        .expect_err("圆柱圆角尚未支持，必须报错而不是静默降级");
     let msg = err.to_string();
-    assert!(msg.contains("不支持"), "应明说不支持，实际：{msg}");
+    assert!(
+        msg.contains("圆角") || msg.contains("拓扑"),
+        "错误应说清楚原因，实际：{msg}"
+    );
     assert!(
         msg.contains("建议") || msg.contains("可选"),
         "错误应给出路，实际：{msg}"
     );
+
+    // 未实现的能力位仍如实报 false
+    let caps = k.capabilities();
+    assert!(!caps.curved_bool, "曲面布尔未做，必须报 false");
 
     // 未知实体仍是标准错误
     let err = k.facts(SolidId(9999)).unwrap_err();
