@@ -313,39 +313,54 @@ pub fn fillet_solid(
             continue;
         };
         let axis = normalize(sub(rl.cb, rl.ca)).unwrap_or([0.0, 0.0, 1.0]);
-        // 两端的弧转向**必须一致**。
+        // ── 统一的 u/w 基 ──
         //
-        // 各自算 `sign = dot(cross(from,to), axis)` 的话，a 端和 b 端可能得不同符号，
-        // 于是四边形的两条母线被扭到不同方向上（twisted），柱面片不再精确，
-        // 体积系统性偏小（实测柱面贡献 2.397，应约 2.65）。
-        // 以 a 端的符号为准，b 端沿用。
-        let sign_ref = {
-            let from = normalize(sub(rl.f1_start, rl.ca)).unwrap_or(rl.m1);
-            let to = normalize(sub(rl.f2_start, rl.ca)).unwrap_or(rl.m2);
-            if dot(cross(from, to), axis) >= 0.0 {
-                1.0
-            } else {
-                -1.0
-            }
+        // 弧的参数化**不能用「各自归一化到自己的圆心」再插角度**：
+        // 两端圆心 c_a、c_b 不同，基准方向就差一点，转出来的两条弧不对应，
+        // 四边形的母线被扭歪（twisted），柱面片就不精确了。
+        //
+        // 改用一套垂直下轴的公用基底 (u, w)，两端绕各自球心转**同一组角度**，
+        // 母线就严格平行于轴。
+        let u0 = {
+            let raw = sub(rl.f1_start, rl.ca);
+            let along = dot(raw, axis);
+            normalize(sub(raw, scale(axis, along))).unwrap_or(rl.m1)
+        };
+        let w0 = normalize(cross(axis, u0)).unwrap_or(rl.m2);
+        let ca_center = spheres.get(&e.a).map(|(c, _)| *c);
+        let cb_center = spheres.get(&e.b).map(|(c, _)| *c);
+        // 从 u 到 f2 所在位置的角度（带符号）
+        let to0 = {
+            let raw = sub(rl.f2_start, rl.ca);
+            let along = dot(raw, axis);
+            normalize(sub(raw, scale(axis, along))).unwrap_or(rl.m2)
+        };
+        let total = dot(u0, to0).clamp(-1.0, 1.0).acos();
+        let sign_ref = if dot(cross(u0, to0), axis) >= 0.0 {
+            1.0
+        } else {
+            -1.0
         };
         for at_b in [false, true] {
-            let (c0, p1, p2) = if at_b {
-                (rl.cb, rl.f1_end, rl.f2_end)
-            } else {
-                (rl.ca, rl.f1_start, rl.f2_start)
-            };
-            let from = normalize(sub(p1, c0)).unwrap_or(rl.m1);
-            let to = normalize(sub(p2, c0)).unwrap_or(rl.m2);
-            let total = dot(from, to).clamp(-1.0, 1.0).acos();
-            let sign = sign_ref;
+            let sc = if at_b { cb_center } else { ca_center };
+            let c0 = if at_b { rl.cb } else { rl.ca };
+            // 弧心：球心优先；顶点没有球时（单边圆角）退回 ca/cb
+            let center = sc.unwrap_or(c0);
+            let _ = center;
             let mut chain: Vec<u32> = Vec::with_capacity(seg_n + 1);
             // 第 0 步固定用 corner_idx 的端点（保证与原面一致）
             let start_key = if at_b { (e.f1, e.b) } else { (e.f1, e.a) };
             chain.push(corner_idx[&start_key]);
             for s in 1..seg_n {
                 let t = s as f64 / seg_n as f64;
-                let dir = rotate(from, axis, total * t * sign);
-                chain.push(put!(add(c0, scale(dir, r))));
+                let ang = total * t * sign_ref;
+                // 用公用基底 (u0, w0) 构造方向，两端严格对应
+                let dir = [
+                    u0[0] * ang.cos() + w0[0] * ang.sin(),
+                    u0[1] * ang.cos() + w0[1] * ang.sin(),
+                    u0[2] * ang.cos() + w0[2] * ang.sin(),
+                ];
+                chain.push(put!(add(center, scale(dir, r))));
             }
             let end_key = if at_b { (e.f2, e.b) } else { (e.f2, e.a) };
             chain.push(corner_idx[&end_key]);
@@ -655,20 +670,6 @@ fn trim_to_sphere(
         t2
     };
     Some(add(p0, scale(dir, t)))
-}
-
-fn rotate(v: Vector3, axis: Vector3, ang: f64) -> Vector3 {
-    let k = normalize(axis).unwrap_or([0.0, 0.0, 1.0]);
-    let c = ang.cos();
-    let s = ang.sin();
-    let kv = cross(k, v);
-    let kd = dot(k, v);
-    normalize([
-        v[0] * c + kv[0] * s + k[0] * kd * (1.0 - c),
-        v[1] * c + kv[1] * s + k[1] * kd * (1.0 - c),
-        v[2] * c + kv[2] * s + k[2] * kd * (1.0 - c),
-    ])
-    .unwrap_or(v)
 }
 
 #[allow(dead_code)]
