@@ -7,7 +7,7 @@
 //! agent 只能传空数组（全倒），而布尔件的碎片面根本经不起全倒。
 //!
 //! 这个模块把边表变成**可读、可筛**的列表，并且边号与
-//! [`crate::chamfer`] / [`crate::fillet`] 内部用的编号**严格一致**——
+//! [`crate::blend::chamfer`] / [`crate::blend::fillet`] 内部用的编号**严格一致**——
 //! 否则调用方选了 5 号边，实现却倒的是另一条。
 //!
 //! # 边号不稳定（重要）
@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use archcore_kernel::{EdgeId, KernelError, Point3, Vector3};
 use serde::{Deserialize, Serialize};
 
-use crate::chamfer::ChamferOptions;
+use crate::blend::ChamferOptions;
 use crate::geom::{dot, sub, Surface};
 use crate::solid::Solid;
 

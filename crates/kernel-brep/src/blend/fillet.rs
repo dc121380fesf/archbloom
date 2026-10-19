@@ -1,0 +1,760 @@
+//! 圆角（fillet）：把锐边换成圆弧过渡。
+//!
+//! # 按 SMLib 的流程重写
+//!
+//! 参考 NVIDIA SMLib 文档（<https://docs.nvidia.com/smlib/manual/smlib/fillets>）：
+//!
+//! > "**Rail Curves** are calculated first, before the fillet surface itself, and their
+//! > intersections with other body topology **largely determine the overall filleting
+//! > situation**."
+//!
+//! 所以顺序是：**轨线 → 圆角面 → 角部**。不是「每条边算一对切点」。
+//!
+//! # 三个核心概念
+//!
+//! ## 轨线（Rail Curve）
+//!
+//! 圆角面与原始面的交线。对一条边、一个侧面：
+//!
+//! ```text
+//! 轨线 = 面上距边 R 的直线（平行于边）
+//! ```
+//!
+//! 轨线一直延伸到边的两端，在角部与**球面相交**——那个交点才是真正的边界终点。
+//!
+//! ## 球心（顶点处）
+//!
+//! 盒子的角是 SMLib 分类里的 **NxN Same-Convexity Corner**，原文说
+//! "the corner will be an analytical surface (**Sphere**)"。
+//!
+//! 球心要**精确求解**：到顶点周围每个面的距离都等于 R。
+//!
+//! ```text
+//! 对每个相邻面 i：(c - v) · m_i = R      （m_i = -n_i 是内法线）
+//! 三个面 → 三元一次方程组 → Cramer 法则
+//! ```
+//!
+//! 盒子角 (0,0,0)、R=0.2 时解出 `c = (0.2, 0.2, 0.2)`——到三个面都是 R。
+//!
+//! ## 轨线端点 = 轨线 ∩ 球面
+//!
+//! 把轨线参数化成 `p(t) = p0 + t·e`，代入 `|p - c|² = R²` 解二次方程，
+//! 取靠近边的那个根。
+//!
+//! # 为什么不能复用倒角
+//!
+//! 倒角的内缩点是「面内两个方向都退 R」的交点 `(0.2, 0.2, 0)`；
+//! 圆角的轨线端点是「只退一个方向，再与球面求交」`(0.2, 0, 0)` 附近。
+//! 两者不同——复用过一次，弧的半径从 0.2 变成 0.346，体积差 39%。
+
+use std::collections::HashMap;
+
+use archcore_kernel::{KernelError, Point3, Vector3};
+
+use crate::edges::edge_table;
+use crate::geom::{add, cross, dot, normalize, scale, sub, Surface};
+use crate::solid::{Face, Solid};
+
+/// 圆角参数。
+#[derive(Clone, Copy, Debug)]
+pub struct FilletOptions {
+    pub radius: f64,
+    /// 圆弧离散段数。
+    pub segments: usize,
+}
+
+impl Default for FilletOptions {
+    fn default() -> Self {
+        Self {
+            radius: 0.001,
+            segments: 8,
+        }
+    }
+}
+
+/// 一条边的两条轨线（每侧一条）。
+struct Rails {
+    /// 面 f1 上的轨线：起点、方向（已延伸到球面端点）
+    f1_start: Point3,
+    f1_end: Point3,
+    /// 面 f2 上
+    f2_start: Point3,
+    f2_end: Point3,
+    /// 圆角轴心线两端（圆心）
+    ca: Point3,
+    cb: Point3,
+    m1: Vector3,
+    m2: Vector3,
+}
+
+/// 对实体做圆角。返回新实体。
+pub fn fillet_solid(
+    solid: &Solid,
+    edges: &[u64],
+    opts: &FilletOptions,
+) -> Result<Solid, KernelError> {
+    if opts.radius <= 0.0 || !opts.radius.is_finite() {
+        return Err(KernelError::Degenerate {
+            at: [0.0, 0.0, 0.0],
+            reason: format!("圆角半径必须为正，收到 {}", opts.radius),
+            suggestion: "传入大于 0 的半径，例如 0.001（R1mm）".to_string(),
+        });
+    }
+    let table = edge_table(solid)?;
+    if table.is_empty() {
+        return Err(KernelError::TopologyBroken {
+            at: "fillet".to_string(),
+            reason: "边表为空".to_string(),
+            suggestion: "检查实体构造".to_string(),
+        });
+    }
+
+    let selected: Vec<bool> = if edges.is_empty() {
+        table.iter().map(|e| e.sharp).collect()
+    } else {
+        let mut want = vec![false; table.len()];
+        for &id in edges {
+            let idx = id as usize;
+            if idx >= table.len() {
+                return Err(KernelError::Degenerate {
+                    at: [0.0, 0.0, 0.0],
+                    reason: format!("边号 {id} 超出范围（共 {} 条）", table.len()),
+                    suggestion: format!("边号范围是 0..{}", table.len()),
+                });
+            }
+            want[idx] = table[idx].sharp;
+        }
+        want
+    };
+    if !selected.iter().any(|s| *s) {
+        return Ok(solid.clone());
+    }
+
+    let r = opts.radius;
+
+    // ── 1. 每个顶点的球心 ──
+    // 顶点 → (球心, 相邻面列表)
+    let mut spheres: HashMap<u32, (Point3, Vec<usize>)> = HashMap::new();
+    let mut verts_of_edge: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (i, e) in table.iter().enumerate() {
+        if !selected[i] {
+            continue;
+        }
+        for v in [e.a, e.b] {
+            let entry = verts_of_edge.entry(v).or_default();
+            if !entry.contains(&i) {
+                entry.push(i);
+            }
+        }
+    }
+    for (&v, edge_ids) in &verts_of_edge {
+        let mut faces: Vec<usize> = Vec::new();
+        for &ei in edge_ids {
+            for fi in [table[ei].f1, table[ei].f2] {
+                if !faces.contains(&fi) {
+                    faces.push(fi);
+                }
+            }
+        }
+        if faces.len() < 3 {
+            // 只有两个面参与（单边圆角）：角部是「轨线延伸到相邻边」，另算
+            continue;
+        }
+        let mut ns: Vec<Vector3> = faces.iter().map(|&fi| face_normal(solid, fi)).collect();
+        // 取前三个面解 3x3
+        ns.truncate(3);
+        let pv = solid.verts[v as usize];
+        if let Some(c) = solve_sphere_center(pv, &ns, r) {
+            spheres.insert(v, (c, faces));
+        }
+    }
+
+    // ── 2. 每条边的两条轨线（端点与球面求交） ──
+    let mut rails: HashMap<(u32, u32), Rails> = HashMap::new();
+    for (i, e) in table.iter().enumerate() {
+        if !selected[i] {
+            continue;
+        }
+        let n1 = face_normal(solid, e.f1);
+        let n2 = face_normal(solid, e.f2);
+        let m1 = scale(n1, -1.0);
+        let m2 = scale(n2, -1.0);
+        let Some(bis) = normalize(add(m1, m2)) else {
+            continue;
+        };
+        let alpha = dot(n1, n2).clamp(-1.0, 1.0).acos();
+        let theta = std::f64::consts::PI - alpha;
+        let sin_half = (theta * 0.5).sin();
+        if sin_half.abs() < 1e-9 {
+            continue;
+        }
+        let d = r / sin_half;
+        let pa = solid.verts[e.a as usize];
+        let pb = solid.verts[e.b as usize];
+        let ca = add(pa, scale(bis, d));
+        let cb = add(pb, scale(bis, d));
+
+        // 轨线：面上距边 R、平行于边的直线。
+        //
+        // 方向靠「边点 → 圆心」再投影到面内得到。
+        // **不能用 cross(n, edir)**——它的符号依赖环方向，盒子两个面一个对一个反，
+        // 实测体积会超过原体积（8.01 / 8.65），说明弧朝外凸了。
+        let edir = normalize(sub(pb, pa)).unwrap_or([1.0, 0.0, 0.0]);
+        let dir1 = {
+            let d = sub(ca, pa);
+            let proj = sub(d, scale(n1, dot(d, n1)));
+            normalize(proj).unwrap_or([0.0, 0.0, 1.0])
+        };
+        let dir2 = {
+            let d = sub(cb, pb);
+            let proj = sub(d, scale(n2, dot(d, n2)));
+            normalize(proj).unwrap_or([0.0, 0.0, 1.0])
+        };
+        // 轨线起点：距边 R
+        let rp1 = add(pa, scale(dir1, r));
+        let rp2 = add(pa, scale(dir2, r));
+
+        // 端点：与两端球面求交
+        let a1 = trim_to_sphere(rp1, edir, spheres.get(&e.a), r).unwrap_or(rp1);
+        let b1 = trim_to_sphere(
+            add(pb, scale(dir1, r)),
+            edir,
+            spheres.get(&e.b),
+            r,
+        )
+        .unwrap_or(add(pb, scale(dir1, r)));
+        let a2 = trim_to_sphere(rp2, edir, spheres.get(&e.a), r).unwrap_or(rp2);
+        let b2 = trim_to_sphere(
+            add(pb, scale(dir2, r)),
+            edir,
+            spheres.get(&e.b),
+            r,
+        )
+        .unwrap_or(add(pb, scale(dir2, r)));
+
+        rails.insert(
+            (e.a, e.b),
+            Rails {
+                f1_start: a1,
+                f1_end: b1,
+                f2_start: a2,
+                f2_end: b2,
+                ca,
+                cb,
+                m1,
+                m2,
+            },
+        );
+    }
+    let _ = verts_of_edge;
+
+    // ── 3. 组装 ──
+    let mut out = Solid::default();
+    let mut weld: HashMap<(i64, i64, i64), u32> = HashMap::new();
+    macro_rules! put {
+        ($p:expr) => {{
+            let p: Point3 = $p;
+            let k = (
+                (p[0] / 1e-9).round() as i64,
+                (p[1] / 1e-9).round() as i64,
+                (p[2] / 1e-9).round() as i64,
+            );
+            if let Some(&i) = weld.get(&k) {
+                i
+            } else {
+                let i = out.push_vert(p);
+                weld.insert(k, i);
+                i
+            }
+        }};
+    }
+
+    // ── 索引共享（关键重构）──
+    //
+    // 端点的坐标只算一次、索引只分配一次。
+    // 之后原面、圆角面、角部面**全部引用同一批索引**，不靠坐标合并。
+    //
+    // 之前是每个面各自 put!(坐标)，靠 weld 按量化坐标合并——
+    // 浮点一抖就合不上，实测 234 条孤边 / 333 条总边。
+    let mut corner_idx: HashMap<(usize, u32), u32> = HashMap::new();
+    for (i, e) in table.iter().enumerate() {
+        if !selected[i] {
+            continue;
+        }
+        let Some(rl) = rails.get(&(e.a, e.b)) else {
+            continue;
+        };
+        corner_idx.insert((e.f1, e.a), put!(rl.f1_start));
+        corner_idx.insert((e.f1, e.b), put!(rl.f1_end));
+        corner_idx.insert((e.f2, e.a), put!(rl.f2_start));
+        corner_idx.insert((e.f2, e.b), put!(rl.f2_end));
+    }
+
+    // ── 端圆点位预生成（角部面与圆角面共享）──
+    //
+    // 圆角面是按**端圆**分段的：第 s 段的点绕 ca（或 cb）转 ang*t。
+    // 因此它的短边就是端圆上的一小段弧。
+    //
+    // 角部面如果只拿 3 个「轨线端点」连三角，就只共享到端点那条，
+    // 剩下 seg-1 段的弧全部悬空——实测 240 半边里 120 条没配对。
+    //
+    // 这里把端圆上每个中间点也建成索引（key = 棱 + 端的哪一侧 + 第几步），
+    // 圆角面与角部面都从这里取，同一个 s 就是同一个顶点。
+    //
+    // `arcs[(a, b, at_b)]` 存 seg+1 个索引：第 0 步是轨线端点 f1，
+    // 第 seg 步是 f2（另一端），中间是弧点。
+    let seg_n = opts.segments.max(2);
+    let mut arcs: HashMap<(u32, u32, bool), Vec<u32>> = HashMap::new();
+    for (i, e) in table.iter().enumerate() {
+        if !selected[i] {
+            continue;
+        }
+        let Some(rl) = rails.get(&(e.a, e.b)) else {
+            continue;
+        };
+        let axis = normalize(sub(rl.cb, rl.ca)).unwrap_or([0.0, 0.0, 1.0]);
+        // ── 统一的 u/w 基 ──
+        //
+        // 弧的参数化**不能用「各自归一化到自己的圆心」再插角度**：
+        // 两端圆心 c_a、c_b 不同，基准方向就差一点，转出来的两条弧不对应，
+        // 四边形的母线被扭歪（twisted），柱面片就不精确了。
+        //
+        // 改用一套垂直下轴的公用基底 (u, w)，两端绕各自球心转**同一组角度**，
+        // 母线就严格平行于轴。
+        let u0 = {
+            let raw = sub(rl.f1_start, rl.ca);
+            let along = dot(raw, axis);
+            normalize(sub(raw, scale(axis, along))).unwrap_or(rl.m1)
+        };
+        let w0 = normalize(cross(axis, u0)).unwrap_or(rl.m2);
+        let ca_center = spheres.get(&e.a).map(|(c, _)| *c);
+        let cb_center = spheres.get(&e.b).map(|(c, _)| *c);
+        // 从 u 到 f2 所在位置的角度（带符号）
+        let to0 = {
+            let raw = sub(rl.f2_start, rl.ca);
+            let along = dot(raw, axis);
+            normalize(sub(raw, scale(axis, along))).unwrap_or(rl.m2)
+        };
+        let total = dot(u0, to0).clamp(-1.0, 1.0).acos();
+        let sign_ref = if dot(cross(u0, to0), axis) >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        };
+        for at_b in [false, true] {
+            let sc = if at_b { cb_center } else { ca_center };
+            let c0 = if at_b { rl.cb } else { rl.ca };
+            // 弧心：球心优先；顶点没有球时（单边圆角）退回 ca/cb
+            let center = sc.unwrap_or(c0);
+            let _ = center;
+            let mut chain: Vec<u32> = Vec::with_capacity(seg_n + 1);
+            // 第 0 步固定用 corner_idx 的端点（保证与原面一致）
+            let start_key = if at_b { (e.f1, e.b) } else { (e.f1, e.a) };
+            chain.push(corner_idx[&start_key]);
+            for s in 1..seg_n {
+                let t = s as f64 / seg_n as f64;
+                let ang = total * t * sign_ref;
+                // 用公用基底 (u0, w0) 构造方向，两端严格对应
+                let dir = [
+                    u0[0] * ang.cos() + w0[0] * ang.sin(),
+                    u0[1] * ang.cos() + w0[1] * ang.sin(),
+                    u0[2] * ang.cos() + w0[2] * ang.sin(),
+                ];
+                chain.push(put!(add(center, scale(dir, r))));
+            }
+            let end_key = if at_b { (e.f2, e.b) } else { (e.f2, e.a) };
+            chain.push(corner_idx[&end_key]);
+            arcs.insert((e.a, e.b, at_b), chain);
+        }
+    }
+
+    // 3a) 原面：边界顶点直接用 corner_idx 的索引
+    for (fi, f) in solid.faces.iter().enumerate() {
+        let n = f.verts.len();
+        let mut ring: Vec<u32> = Vec::with_capacity(n);
+        for i in 0..n {
+            let cur = f.verts[i];
+            match corner_idx.get(&(fi, cur)) {
+                Some(&idx) => ring.push(idx),
+                None => ring.push(put!(solid.verts[cur as usize])),
+            }
+        }
+        let ring = dedup(ring);
+        if ring.len() >= 3 {
+            out.faces.push(Face {
+                surface: f.surface,
+                verts: ring,
+                holes: Vec::new(),
+            });
+        }
+    }
+
+    // 3b) 每条边：segments 段弧
+    for (i, e) in table.iter().enumerate() {
+        if !selected[i] {
+            continue;
+        }
+        let Some(rl) = rails.get(&(e.a, e.b)) else {
+            continue;
+        };
+        let seg = seg_n;
+        let _ = &rl;
+        // 弧点直接取端圆链（与角部面共享索引）
+        let Some(chain_a) = arcs.get(&(e.a, e.b, false)).cloned() else {
+            continue;
+        };
+        let Some(chain_b) = arcs.get(&(e.a, e.b, true)).cloned() else {
+            continue;
+        };
+        // 圆角面：两端用**共享索引**（端圆链）
+        let mut prev_a = corner_idx[&(e.f1, e.a)];
+        let mut prev_b = corner_idx[&(e.f1, e.b)];
+        for s in 1..=seg {
+            let va = chain_a[s];
+            let vb = chain_b[s];
+            let quad = dedup(vec![prev_a, prev_b, vb, va]);
+            if quad.len() >= 3 {
+                // 圆角面的朝向必须「背离轴线」（圆柱外侧）。
+                // 不判的话一半面朝内，体积会被多减一遍。
+                let mut quad = quad;
+                let mid_axis = scale(add(rl.ca, rl.cb), 0.5);
+                let centroid = {
+                    let mut s = [0.0; 3];
+                    for &i in &quad {
+                        let p = out.verts[i as usize];
+                        for k in 0..3 {
+                            s[k] += p[k];
+                        }
+                    }
+                    let m = quad.len() as f64;
+                    [s[0] / m, s[1] / m, s[2] / m]
+                };
+                if dot(plane_normal(&out, &quad), sub(centroid, mid_axis)) < 0.0 {
+                    quad.reverse();
+                }
+                let nrm = plane_normal(&out, &quad);
+                let _ = nrm;
+                // 圆角面是**圆柱面**（轴 = 两端圆心连线，半径 R），不是平面。
+                //
+                // 之前标成 Plane，后果有两个：
+                // 1. STEP 导不出圆柱面（全退化成平面碎片）
+                // 2. `normal_at` 拿平面法线，三角化方向不准，体积偏小（实测 7.53 vs 理论 7.80）
+                let axis = normalize(sub(rl.cb, rl.ca)).unwrap_or([0.0, 0.0, 1.0]);
+                out.faces.push(Face {
+                    surface: Surface::Cylinder {
+                        origin: rl.ca,
+                        axis,
+                        radius: r,
+                    },
+                    verts: quad,
+                    holes: Vec::new(),
+                });
+            }
+            prev_a = va;
+            prev_b = vb;
+        }
+    }
+
+    // 3c) 角部：球面片
+    //
+    // 边界不是「几个轨线端点连成的平面三角」，而是**沿端圆弧走**的球面多边形。
+    //
+    // 链路：球面(c,R) ∩ 柱面(轴过 c，R) 的联立
+    //     (p-c)² = R²、 (p-c)² - ((p-c)·d)² = R²
+    // 相减得 (p-c)·d = 0 —— 交线就是球面上**垂直于棱方向的大圆**，
+    // 而大圆同时也就是圆角面的端圆。两者是同一条曲线，所以自然共享。
+    //
+    // 每个顶点周围有 3 条棱（盒子），每条棱贡献一段端圆弧（seg 段），
+    // 三段弧首尾相接就是这个角部面的边界。
+    for (&v, (c, _faces_at_v)) in &spheres {
+        // 收集绕这个顶点、已被圆角的面之间的弧段。
+        // 每条棱（选中）在 v 处贡献一段弧：从 (f1, v) 到 (f2, v)。
+        // 需要把弧段串成环：弧的起点/终点就是 corner_idx 里的端点索引。
+        struct ArcSeg {
+            pts: Vec<u32>,
+            from: u32,
+            to: u32,
+        }
+        let mut segs: Vec<ArcSeg> = Vec::new();
+        for (i, e) in table.iter().enumerate() {
+            if !selected[i] || (e.a != v && e.b != v) {
+                continue;
+            }
+            let at_b = e.b == v;
+            let Some(chain) = arcs.get(&(e.a, e.b, at_b)) else {
+                continue;
+            };
+            if chain.len() < 2 {
+                continue;
+            }
+            let from = *chain.first().unwrap();
+            let to = *chain.last().unwrap();
+            segs.push(ArcSeg {
+                pts: chain.clone(),
+                from,
+                to,
+            });
+        }
+        if std::env::var("ARCHCORE_DEBUG_CORNER").is_ok() {
+            eprintln!("[corner] v={v} segs={} faces_at_v={:?}", segs.len(), _faces_at_v);
+            for (k, s) in segs.iter().enumerate() {
+                eprintln!("  seg{k} pts={} from={} to={}", s.pts.len(), s.from, s.to);
+            }
+        }
+        if segs.len() < 3 {
+            continue;
+        }
+        // 串环：从第一条弧开始，每次找「一端等于当前终点」的下一条。
+        //
+        // **必须允许反向使用**：每条端圆的走向由叉积符号决定，
+        // 三条弧不一定首尾同向（实测 seg0: 1→3、seg1: 1→13、seg2: 3→13，
+        // 全同向串不起来）。反向时把点列倒过来走就行。
+        let mut ring: Vec<u32> = Vec::new();
+        let mut used = vec![false; segs.len()];
+        let mut cur_end = segs[0].from;
+        let mut ok = true;
+        let mut first = true;
+        for _ in 0..segs.len() {
+            let Some(k) = segs
+                .iter()
+                .enumerate()
+                .position(|(j, s)| !used[j] && (s.from == cur_end || s.to == cur_end))
+            else {
+                ok = false;
+                break;
+            };
+            used[k] = true;
+            let rev = segs[k].to == cur_end && segs[k].from != cur_end;
+            // **第一条弧不能 skip**：它的首点就是环的起点。
+            // 之前一律 skip(1)，结果每个角部面都丢了一段弧的起点，
+            // 多边形在角点处断开一截——体积贡献只剩理论一半。
+            let skip = if first { 0 } else { 1 };
+            first = false;
+            if rev {
+                for &p in segs[k].pts.iter().rev().skip(skip) {
+                    if ring.last() != Some(&p) {
+                        ring.push(p);
+                    }
+                }
+                cur_end = segs[k].from;
+            } else {
+                for &p in segs[k].pts.iter().skip(skip) {
+                    if ring.last() != Some(&p) {
+                        ring.push(p);
+                    }
+                }
+                cur_end = segs[k].to;
+            }
+        }
+        if !ok || cur_end != segs[0].from {
+            continue;
+        }
+        // 环首尾重复去掉
+        if ring.len() > 1 && ring.first() == ring.last() {
+            ring.pop();
+        }
+        let mut ring = dedup(ring);
+        if ring.len() < 3 {
+            continue;
+        }
+        // 朝向：球面片必须**背离球心**。
+        //
+        // 原来用「投影累积 ccw」判：把环上相邻点的叉积投影到径向再累加。
+        // 对球面三角这种不共面的多边形，各项方向不一致、会互相抵消，
+        // 结果符号抖动——实测八个角部的体积贡献从 -0.004 到 +0.058，
+        // 本该全部同号。
+        //
+        // 改用「取头三个不共线点算平面法线，与径向比方向」。
+        // 这三个点必在同一段弧附近，共面性好，符号稳定。
+        let centroid = centroid_of(&out, &ring);
+        let radial = sub(centroid, *c);
+        let mut nrm_ref = [0.0, 0.0, 0.0];
+        for i in 1..ring.len().saturating_sub(1) {
+            let a = out.verts[ring[0] as usize];
+            let b = out.verts[ring[i] as usize];
+            let d = out.verts[ring[i + 1] as usize];
+            let cr = cross(sub(b, a), sub(d, a));
+            if (cr[0]*cr[0] + cr[1]*cr[1] + cr[2]*cr[2]).sqrt() > 1e-12 {
+                nrm_ref = cr;
+                break;
+            }
+        }
+        if dot(nrm_ref, radial) < 0.0 {
+            ring.reverse();
+        }
+        out.faces.push(Face {
+            surface: Surface::Sphere {
+                center: *c,
+                radius: r,
+            },
+            verts: ring,
+            holes: Vec::new(),
+        });
+    }
+
+    out.analytic_volume = None;
+    out.analytic_area = None;
+    // 半边拓扑自检：把断裂点直接暴露出来
+    out.build_topology();
+    if std::env::var("ARCHCORE_DEBUG_FILLET").is_ok() {
+        let problems = out.check_topology();
+        eprintln!(
+            "[fillet] 半边 {} 边 {} 边界半边 {} 问题 {} 条",
+            out.half_edges.len(),
+            out.edges.len(),
+            out.boundary_half_edges(),
+            problems.len()
+        );
+        for p in problems.iter().take(6) {
+            eprintln!("  {p}");
+        }
+    }
+    Ok(out)
+}
+
+/// 解球心：`(c - v) · m_i = R`，三个面 → 三元一次方程组。
+///
+/// 用 Cramer 法则解 3x3。行列式太小时返回 None（三面近乎共面）。
+fn solve_sphere_center(v: Point3, normals: &[Vector3], r: f64) -> Option<Point3> {
+    if normals.len() < 3 {
+        return None;
+    }
+    let m: Vec<Vector3> = normals.iter().map(|n| scale(*n, -1.0)).collect();
+    let (a1, a2, a3) = (m[0], m[1], m[2]);
+    let det = dot(a1, cross(a2, a3));
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    // RHS 全为 r（因为 c·m_i - v·m_i = R → c·m_i = R + v·m_i）
+    let b = [
+        r + dot(v, m[0]),
+        r + dot(v, m[1]),
+        r + dot(v, m[2]),
+    ];
+
+    // Cramer 法则：**矩阵的行为方程系数**（a1/a2/a3），
+    // 所以求 x 时替换的是**第 1 列**，而不是把 a2/a3 当行向量做叉乘。
+    //
+    // 早先写成 dot(b, cross(a2, a3))，把行当成了列——
+    // 盒子角解出了 (-1.8, 0.2, -0.2)（正确答案是 1.8, 0.2, 0.2），符号全反。
+    let col2 = [a1[1], a2[1], a3[1]];
+    let col3 = [a1[2], a2[2], a3[2]];
+    let col1 = [a1[0], a2[0], a3[0]];
+    let x = dot(b, cross(col2, col3)) / det;
+    let y = dot(b, cross(col3, col1)) / det;
+    let z = dot(b, cross(col1, col2)) / det;
+    Some([x, y, z])
+}
+
+/// 把轨线起点沿边方向推到球面上（取靠边的根）。
+fn trim_to_sphere(
+    p0: Point3,
+    dir: Vector3,
+    sphere: Option<&(Point3, Vec<usize>)>,
+    r: f64,
+) -> Option<Point3> {
+    let (c, _) = sphere?;
+    // |p0 + t*dir - c|² = r²
+    let d = sub(p0, *c);
+    let a = dot(dir, dir);
+    let b = 2.0 * dot(d, dir);
+    let cc = dot(d, d) - r * r;
+    let disc = b * b - 4.0 * a * cc;
+    // 判别式在这里**恒为 0**（重根），不是巧合：
+    //   |p0−c|² = 2R²　⇒　cc = R²
+    //   b = 2(p0−c)·dir = −2R　⇒　b² = 4R²
+    //   disc = 4R² − 4R² = 0
+    // 所以剩下的只有浮点误差。写 `disc < 0.0` 太硬：R 小的时候
+    // 相对误差更大，踩到 −1e-18 就直接返回 None，端点丢掉，
+    // 整个角部缝合崩掉。
+    //
+    // 实测表现：盒子 1m 边长时 R=0.1 能过、R=0.05 失败；
+    // 0.1m 边长时 R=0.01 能过、R=0.005 失败。
+    let eps = 1e-12 * (b * b).max(1e-30);
+    if disc < -eps {
+        return None;
+    }
+    let disc = disc.max(0.0);
+    let sq = disc.sqrt();
+    let t1 = (-b + sq) / (2.0 * a);
+    let t2 = (-b - sq) / (2.0 * a);
+    if std::env::var("ARCHCORE_DEBUG_FILLET").is_ok() {
+        eprintln!("[trim] p0={:?} dir={:?} c={:?} | d={:?} b={:.4} cc={:.4} disc={:.4} t1={:.4} t2={:.4}",
+            p0, dir, c, d, b, cc, disc, t1, t2);
+    }
+    // 取较小的正根（离边最近）
+    let t = if t1.abs() < t2.abs() {
+        t1
+    } else {
+        t2
+    };
+    Some(add(p0, scale(dir, t)))
+}
+
+#[allow(dead_code)]
+fn dist2(a: Point3, b: Point3) -> f64 {
+    let d = sub(a, b);
+    dot(d, d)
+}
+
+fn centroid_of(out: &Solid, ring: &[u32]) -> Point3 {
+    let mut s = [0.0; 3];
+    for &i in ring {
+        let p = out.verts[i as usize];
+        for k in 0..3 {
+            s[k] += p[k];
+        }
+    }
+    let m = ring.len() as f64;
+    [s[0] / m, s[1] / m, s[2] / m]
+}
+
+/// 把两点的中点投影到球面上（预留：球面细分会用）。
+#[allow(dead_code)]
+fn project_to_sphere(a: Point3, b: Point3, center: Point3, r: f64) -> Point3 {
+    let mid = scale(add(a, b), 0.5);
+    normalize(sub(mid, center))
+        .map(|d| add(center, scale(d, r)))
+        .unwrap_or(mid)
+}
+
+fn dedup(ring: Vec<u32>) -> Vec<u32> {
+    let mut o: Vec<u32> = Vec::with_capacity(ring.len());
+    for v in ring {
+        if o.last() != Some(&v) {
+            o.push(v);
+        }
+    }
+    while o.len() > 1 && o.first() == o.last() {
+        o.pop();
+    }
+    o
+}
+
+fn face_normal(solid: &Solid, fi: usize) -> Vector3 {
+    let f = &solid.faces[fi];
+    if f.verts.is_empty() {
+        return [0.0, 0.0, 1.0];
+    }
+    f.surface
+        .normal_at(solid.verts[f.verts[0] as usize])
+        .or_else(|| polygon_normal(solid, &f.verts))
+        .unwrap_or([0.0, 0.0, 1.0])
+}
+
+fn polygon_normal(solid: &Solid, ring: &[u32]) -> Option<Vector3> {
+    if ring.len() < 3 {
+        return None;
+    }
+    let a = solid.verts[ring[0] as usize];
+    let b = solid.verts[ring[1] as usize];
+    let c = solid.verts[ring[2] as usize];
+    normalize(cross(sub(b, a), sub(c, a)))
+}
+
+fn plane_normal(out: &Solid, ring: &[u32]) -> Vector3 {
+    let a = out.verts[ring[0] as usize];
+    let b = out.verts[ring[1] as usize];
+    let c = out.verts[ring[2] as usize];
+    normalize(cross(sub(b, a), sub(c, a))).unwrap_or([0.0, 0.0, 1.0])
+}

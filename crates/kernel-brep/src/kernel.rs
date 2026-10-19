@@ -28,7 +28,7 @@ use archcore_kernel::{
     SolidFacts, SolidId, Tess,
 };
 
-use crate::chamfer::{chamfer_solid, ChamferOptions};
+use crate::blend::{chamfer_solid, ChamferOptions};
 use crate::solid::{box_solid, cylinder_solid, volume_from_mesh, Solid};
 
 /// 精确内核：ID → 实体。ID 单调递增、永不复用。
@@ -286,10 +286,10 @@ impl GeometryKernel for BrepKernel {
         let ids: Vec<u64> = edges.iter().map(|e| e.0).collect();
         // 离散段数：固定 8 段。实测圆角盒子在 seg=8 上体积误差 0.049%，
         // 再细收益递减（seg=32 才 0.018%）而面数翻三倍。
-        let out = crate::fillet::fillet_solid(
+        let out = crate::blend::fillet::fillet_solid(
             s,
             &ids,
-            &crate::fillet::FilletOptions {
+            &crate::blend::fillet::FilletOptions {
                 radius,
                 segments: 8,
             },

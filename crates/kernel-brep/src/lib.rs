@@ -34,10 +34,9 @@
 //! ```
 
 mod boolean;
-mod chamfer;
+mod blend;
 mod csg;
 mod edges;
-mod fillet;
 mod fix_holes;
 mod geom;
 mod kernel;
@@ -50,8 +49,7 @@ mod step;
 mod stl;
 
 pub use boolean::{Plane, Polygon};
-pub use chamfer::{chamfer_solid, ChamferOptions};
-pub use fillet::{fillet_solid, FilletOptions};
+pub use blend::{chamfer_solid, fillet_solid, ChamferOptions, FilletOptions};
 pub use edges::{edge_table, is_real_edge, list_edges, EdgeInfo, EdgeRec};
 pub use csg::{point_inside, select_faces, split_all};
 pub use geom::{Curve, Surface};
