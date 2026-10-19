@@ -683,11 +683,16 @@ pub fn cylinder_solid(base: Point3, radius: f64, height: f64, segments: usize) -
     // 底面（法线 -Z）：环反向
     let mut bot_ring: Vec<u32> = bottom.clone();
     bot_ring.reverse();
-    // 参数域（平面）：uv 取局部 x/y。圆盘边界就是这 n 个点。
+    // 参数域（平面）：**用 project 从实际顶点反推**，保证与 eval 同一套基底。
+    // 直接写 (R cosθ, R sinθ) 会错——eval 用的基底是 orthonormal_basis(normal)，
+    // 对 +Z 来说是 u=(0,1,0)、v=(-1,0,0)，不是一个单位阵。
     let disc_uv: Vec<[f64; 2]> = (0..n)
         .map(|i| {
             let a = TAU * (i as f64) / (n as f64);
-            [radius * a.cos(), radius * a.sin()]
+            let p = [base[0] + radius * a.cos(), base[1] + radius * a.sin(), base[2]];
+            Surface::Plane { origin: base, normal: [0.0, 0.0, -1.0] }
+                .project(p)
+                .unwrap_or([radius * a.cos(), radius * a.sin()])
         })
         .collect();
     // 弦高误差：离散多边形与真圆的偏差
@@ -849,6 +854,77 @@ mod tests {
         assert!(s.faces.iter().all(|f| f.boundary.is_none()));
         for f in &s.faces {
             assert!(f.check(&s, 1e-9).is_ok());
+        }
+    }
+
+    /// 步 3：`eval` 与 `project` 必须互逆。
+    ///
+    /// 这是参数域能不能用的前提——反推出来的 uv 再 eval 回去，
+    /// 必须回到原处。基底选得不对，这里立刻会暴露。
+    #[test]
+    fn 曲面参数往返一致() {
+        use crate::geom::{len, sub};
+        let cases: Vec<(Surface, Vec<[f64; 2]>)> = vec![
+            (
+                Surface::Plane {
+                    origin: [1.0, 2.0, 3.0],
+                    normal: [0.0, 0.0, 1.0],
+                },
+                vec![[0.0, 0.0], [1.5, 0.0], [1.5, 2.5], [0.0, 2.5]],
+            ),
+            (
+                Surface::Cylinder {
+                    origin: [0.0, 0.0, 0.0],
+                    axis: [0.0, 0.0, 1.0],
+                    radius: 0.005,
+                },
+                vec![[0.0, 0.0], [1.0, 0.0], [1.0, 0.02], [0.0, 0.02]],
+            ),
+            (
+                Surface::Sphere {
+                    center: [1.0, 1.0, 1.0],
+                    radius: 0.2,
+                },
+                vec![[0.0, 0.0], [1.0, 0.5], [-2.0, 0.3]],
+            ),
+        ];
+        for (s, uvs) in cases {
+            for uv in uvs {
+                let p = s.eval(uv).expect("eval");
+                let back = s.project(p).expect("project");
+                let p2 = s.eval(back).expect("eval2");
+                let d = len(sub(p, p2));
+                assert!(d < 1e-12, "参数往返偏差 {d:.3e}（uv={uv:?}）");
+            }
+        }
+    }
+
+    /// 步 3：细分段数必须跟容差走——tol 越小，段数越多。
+    #[test]
+    fn 细分段数随容差变化() {
+        let cyl = Surface::Cylinder {
+            origin: [0.0, 0.0, 0.0],
+            axis: [0.0, 0.0, 1.0],
+            radius: 0.005,
+        };
+        let ring = vec![vec![
+            [0.0, 0.0],
+            [2.0 * std::f64::consts::PI, 0.0],
+            [2.0 * std::f64::consts::PI, 0.02],
+            [0.0, 0.02],
+        ]];
+        let coarse = cyl.tessellate_boundary(&ring, 1e-3);
+        let fine = cyl.tessellate_boundary(&ring, 1e-6);
+        let n_coarse = coarse[0].len();
+        let n_fine = fine[0].len();
+        assert!(
+            n_fine > n_coarse * 10,
+            "容差缩 1000 倍，段数应显著增加：{n_coarse} → {n_fine}"
+        );
+        // 所有细分点都应在圆柱面上
+        for p in &fine[0] {
+            let d = (p[0] * p[0] + p[1] * p[1]).sqrt();
+            assert!((d - 0.005).abs() < 1e-12, "细分点不在圆柱面上");
         }
     }
 
