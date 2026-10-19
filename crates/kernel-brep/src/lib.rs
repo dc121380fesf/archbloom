@@ -33,7 +33,7 @@
 //! // f.volume 是 π·r²·h 的闭式解，不是从三角面量出来的
 //! ```
 
-mod bsp;
+mod boolean;
 mod chamfer;
 mod csg;
 mod edges;
@@ -49,10 +49,10 @@ mod solid;
 mod step;
 mod stl;
 
-pub use bsp::{Plane, Polygon};
-pub use chamfer::{chamfer_solid, edge_table, ChamferOptions, EdgeRec};
+pub use boolean::{Plane, Polygon};
+pub use chamfer::{chamfer_solid, ChamferOptions};
 pub use fillet::{fillet_solid, FilletOptions};
-pub use edges::{list_edges, EdgeInfo};
+pub use edges::{edge_table, is_real_edge, list_edges, EdgeInfo, EdgeRec};
 pub use csg::{point_inside, select_faces, split_all};
 pub use geom::{Curve, Surface};
 pub use kernel::{shared, BrepKernel};

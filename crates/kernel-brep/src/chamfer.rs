@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use archcore_kernel::{KernelError, Point3, Vector3};
 
 use crate::geom::{add, cross, dot, normalize, scale, sub, Surface};
+use crate::edges::{edge_table, EdgeRec};
 use crate::solid::{Face, Solid};
 
 /// 顶点合并容差。**不要放大**：倒角产生的斜面很窄，容差大了会把两侧的面吞掉。
@@ -50,22 +51,9 @@ impl Default for ChamferOptions {
     }
 }
 
-/// 一条无向边的完整信息。
-pub struct EdgeRec {
-    pub a: u32,
-    pub b: u32,
-    /// 两个相邻面。水密实体必有恰好两个。
-    pub f1: usize,
-    pub f2: usize,
-    /// 是否达到倒角条件。
-    pub sharp: bool,
-    /// 两面法线夹角（度）。给边查询用；倒角自身的判据是 [`Self::sharp`]。
-    pub angle_deg: f64,
-}
-
 /// 对实体做平面倒角，返回新实体。
 ///
-/// `edges` 为空表示「所有锐边」；否则只倒指定的边（按 [`Solid::edge_table`] 的顺序编号）。
+/// `edges` 为空表示「所有锐边」；否则只倒指定的边（按 [`crate::edges::edge_table`] 的顺序编号）。
 pub fn chamfer_solid(
     solid: &Solid,
     edges: &[u64],
@@ -122,7 +110,7 @@ pub fn chamfer_solid(
     // 每条边一个内缩量：选中的边切 width，其余不动
     let mut edge_width: HashMap<(u32, u32), f64> = HashMap::new();
     for (i, e) in table.iter().enumerate() {
-        let k = key(e.a, e.b);
+        let k = if e.a <= e.b { (e.a, e.b) } else { (e.b, e.a) };
         edge_width.insert(k, if selected[i] { opts.width } else { 0.0 });
         // 反向也登记，方便按有向查询
         edge_width.insert((e.b, e.a), if selected[i] { opts.width } else { 0.0 });
@@ -265,68 +253,6 @@ pub fn chamfer_solid(
 
     out.analytic_volume = None;
     out.analytic_area = None;
-    Ok(out)
-}
-
-type Key = (u32, u32);
-
-fn key(a: u32, b: u32) -> Key {
-    if a <= b {
-        (a, b)
-    } else {
-        (b, a)
-    }
-}
-
-/// 把隐式边落成显式表。
-///
-/// 顺带做水密检查：每条边必须恰好两个面。两个后端（网格/B-rep）都靠这一条
-/// 判断「这个实体还能不能做拓扑运算」。
-pub fn edge_table(solid: &Solid) -> Result<Vec<EdgeRec>, KernelError> {
-    let mut map: HashMap<Key, Vec<usize>> = HashMap::new();
-    for (fi, f) in solid.faces.iter().enumerate() {
-        let n = f.verts.len();
-        for i in 0..n {
-            let a = f.verts[i];
-            let b = f.verts[(i + 1) % n];
-            if a == b {
-                return Err(KernelError::TopologyBroken {
-                    at: String::new(),
-                    reason: format!("面 {fi} 含零长度边（顶点 {a} 重复）"),
-                    suggestion: "检查实体构造".to_string(),
-                });
-            }
-            map.entry(key(a, b)).or_default().push(fi);
-        }
-    }
-
-    let mut out = Vec::with_capacity(map.len());
-    for ((a, b), faces) in map {
-        if faces.len() != 2 {
-            return Err(KernelError::TopologyBroken {
-                at: String::new(),
-                reason: format!(
-                    "边 ({a},{b}) 被 {} 个面共享（水密实体应为 2）",
-                    faces.len()
-                ),
-                suggestion: "先修复实体水密性（is_watertight 应返回 true）".to_string(),
-            });
-        }
-        let (f1, f2) = (faces[0], faces[1]);
-        let n1 = face_normal(solid, &solid.faces[f1], f1);
-        let n2 = face_normal(solid, &solid.faces[f2], f2);
-        let ang = dot(n1, n2).clamp(-1.0, 1.0).acos().to_degrees();
-        out.push(EdgeRec {
-            a,
-            b,
-            f1,
-            f2,
-            sharp: ang > 30.0,
-            angle_deg: ang,
-        });
-    }
-    // 确定性排序：按顶点号，保证同一实体两次得到的边号一致
-    out.sort_by_key(|e| (e.a, e.b));
     Ok(out)
 }
 

@@ -5,7 +5,7 @@
 //!
 //! # 容差
 //!
-//! 顶点合并用 [`WELD_TOL`]（0.1 微米）。比 [`bsp::EPS`](crate::bsp::EPS) 宽一档，
+//! 顶点合并用 [`WELD_TOL`]（0.1 微米）。比 [`boolean::EPS`](crate::boolean::EPS) 宽一档，
 //! 因为交点是「平面求交 + 插值」算出来的，误差比原始顶点大。
 //!
 //! 太松会把真的不同顶点焊在一起（几何被悄悄改形），太紧会让本该共享的顶点分开
@@ -13,7 +13,7 @@
 
 use archcore_kernel::{KernelError, Point3};
 
-use crate::bsp::Polygon;
+use crate::boolean::Polygon;
 use crate::geom::{dot, len, sub};
 use crate::solid::{Face, Solid};
 

@@ -51,7 +51,7 @@ use std::collections::HashMap;
 
 use archcore_kernel::{KernelError, Point3, Vector3};
 
-use crate::chamfer::edge_table;
+use crate::edges::edge_table;
 use crate::geom::{add, cross, dot, normalize, scale, sub, Surface};
 use crate::solid::{Face, Solid};
 

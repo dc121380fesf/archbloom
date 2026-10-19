@@ -21,7 +21,7 @@
 
 use archcore_kernel::Point3;
 
-use crate::bsp::{split_polygon, Plane, Polygon};
+use crate::boolean::{split_polygon, Plane, Polygon};
 use crate::geom::{cross, dot, sub};
 use crate::solid::Solid;
 
@@ -74,9 +74,9 @@ fn crosses(pl: &Plane, p: &Polygon) -> bool {
     let mut back = false;
     for v in &p.verts {
         let d = pl.distance(*v);
-        if d > crate::bsp::EPS {
+        if d > crate::boolean::EPS {
             front = true;
-        } else if d < -crate::bsp::EPS {
+        } else if d < -crate::boolean::EPS {
             back = true;
         }
         if front && back {
@@ -185,7 +185,7 @@ pub fn select_faces(
     let probe = |p: &Polygon| -> Point3 {
         let c = p.centroid();
         let n = p.plane.normal;
-        let k = crate::bsp::EPS * 100.0;
+        let k = crate::boolean::EPS * 100.0;
         [c[0] - n[0] * k, c[1] - n[1] * k, c[2] - n[2] * k]
     };
 
