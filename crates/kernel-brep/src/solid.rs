@@ -165,7 +165,7 @@ impl Solid {
             .filter(|(_, n)| *n > 1)
             .map(|(s, n)| (describe_surface(&s), n))
             .collect();
-        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
         out
     }
 
