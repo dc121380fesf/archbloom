@@ -176,12 +176,30 @@ impl Solid {
     }
 
     pub fn push_face(&mut self, surface: Surface, verts: Vec<u32>) -> usize {
+        self.faces.push(Face::legacy(surface, verts, Vec::new()));
+        self.faces.len() - 1
+    }
+
+    /// 推一个**带参数域**的面。
+    ///
+    /// `boundary` 是曲面参数空间里的边界（外环在前，然后是洞），
+    /// `tolerance` 是这个面承诺的弦高误差。
+    ///
+    /// 现在 `verts` 仍然是调用方给的（步 2 不改结构），`boundary` 只是记下来。
+    /// 到 `docs/face-param-domain.md` 的步 4，`verts` 会改成由它生成。
+    pub fn push_face_with_boundary(
+        &mut self,
+        surface: Surface,
+        verts: Vec<u32>,
+        boundary: Vec<Vec<[f64; 2]>>,
+        tolerance: f64,
+    ) -> usize {
         self.faces.push(Face {
             surface,
             verts,
             holes: Vec::new(),
-        boundary: None,
-        tolerance: None,
+            boundary: Some(boundary),
+            tolerance: Some(tolerance),
         });
         self.faces.len() - 1
     }
@@ -665,20 +683,33 @@ pub fn cylinder_solid(base: Point3, radius: f64, height: f64, segments: usize) -
     // 底面（法线 -Z）：环反向
     let mut bot_ring: Vec<u32> = bottom.clone();
     bot_ring.reverse();
-    s.push_face(
+    // 参数域（平面）：uv 取局部 x/y。圆盘边界就是这 n 个点。
+    let disc_uv: Vec<[f64; 2]> = (0..n)
+        .map(|i| {
+            let a = TAU * (i as f64) / (n as f64);
+            [radius * a.cos(), radius * a.sin()]
+        })
+        .collect();
+    // 弦高误差：离散多边形与真圆的偏差
+    let sagitta = radius * (1.0 - (PI / n as f64).cos());
+    s.push_face_with_boundary(
         Surface::Plane {
             origin: base,
             normal: [0.0, 0.0, -1.0],
         },
         bot_ring,
+        vec![disc_uv.clone()],
+        sagitta,
     );
     // 顶面（法线 +Z）
-    s.push_face(
+    s.push_face_with_boundary(
         Surface::Plane {
             origin: [base[0], base[1], base[2] + height],
             normal: [0.0, 0.0, 1.0],
         },
         top.clone(),
+        vec![disc_uv],
+        sagitta,
     );
 
     // 侧面：n 个四边形，共享同一圆柱标注
@@ -687,9 +718,26 @@ pub fn cylinder_solid(base: Point3, radius: f64, height: f64, segments: usize) -
         axis: [0.0, 0.0, 1.0],
         radius,
     };
+    // 参数域（圆柱）：uv = (θ, z)，整个侧面就是**一个矩形**。
+    //
+    // 现在仍然切成 n 片输出（步 2 不改结构），但每片记下自己的 θ 区间。
+    // 步 4 会用这个矩形把 n 片合成 1 个面。
+    let dtheta = TAU / n as f64;
     for i in 0..n {
         let j = (i + 1) % n;
-        s.push_face(cyl, vec![bottom[i], bottom[j], top[j], top[i]]);
+        let t0 = i as f64 * dtheta;
+        let t1 = (i + 1) as f64 * dtheta;
+        s.push_face_with_boundary(
+            cyl,
+            vec![bottom[i], bottom[j], top[j], top[i]],
+            vec![vec![
+                [t0, 0.0],
+                [t1, 0.0],
+                [t1, height],
+                [t0, height],
+            ]],
+            sagitta,
+        );
     }
 
     s.analytic_volume = Some(PI * radius * radius * height);
@@ -734,6 +782,75 @@ pub fn volume_from_mesh(positions: &[Point3], indices: &[u32]) -> f64 {
 mod tests {
     use super::*;
     use crate::geom::len;
+
+    /// 步 2 验收：圆柱的三类面都填了参数域，且 `check()` 能查实。
+    #[test]
+    fn 圆柱面都带参数域且自洽() {
+        let s = cylinder_solid([0.0, 0.0, 0.0], 0.005, 0.02, 16);
+        let with_boundary = s.faces.iter().filter(|f| f.boundary.is_some()).count();
+        assert_eq!(
+            with_boundary,
+            s.faces.len(),
+            "圆柱的每个面都应带参数域（顶/底/侧面），实际 {with_boundary}/{}",
+            s.faces.len()
+        );
+        // 所有离散点都应落在它们声称的曲面上
+        for (i, f) in s.faces.iter().enumerate() {
+            let tol = f.tolerance.expect("应有容差");
+            assert!(tol > 0.0, "面 {i} 容差应为正");
+            f.check(&s, tol + 1e-12)
+                .unwrap_or_else(|e| panic!("面 {i} 不自洽：{e}"));
+        }
+    }
+
+    /// 参数域的形状要对：侧面是矩形（θ×z），端面是圆盘。
+    #[test]
+    fn 圆柱参数域形状正确() {
+        let n = 16usize;
+        let r = 0.005;
+        let h = 0.02;
+        let s = cylinder_solid([0.0, 0.0, 0.0], r, h, n);
+        // 侧面共 n 个面，每个的边界是 4 个点的矩形（ θ 区间 × 高度）
+        let sides: Vec<_> = s
+            .faces
+            .iter()
+            .filter(|f| matches!(f.surface, Surface::Cylinder { .. }))
+            .collect();
+        assert_eq!(sides.len(), n, "侧面应有 {n} 片");
+        for f in &sides {
+            let b = f.boundary.as_ref().expect("侧面应有参数域");
+            assert_eq!(b.len(), 1, "侧面只有外环");
+            assert_eq!(b[0].len(), 4, "侧面参数域是矩形");
+            for p in &b[0] {
+                assert!(p[1].abs() < 1e-12 || (p[1] - h).abs() < 1e-12, "z 只能是 0 或 H");
+            }
+        }
+        // 端面：圆盘，n 个点的多边形
+        let planes: Vec<_> = s
+            .faces
+            .iter()
+            .filter(|f| matches!(f.surface, Surface::Plane { .. }))
+            .collect();
+        assert_eq!(planes.len(), 2, "端面只有 2 个");
+        for f in &planes {
+            let b = f.boundary.as_ref().expect("端面应有参数域");
+            assert_eq!(b[0].len(), n, "端面边界是 {n} 边形");
+            for p in &b[0] {
+                let rad = (p[0] * p[0] + p[1] * p[1]).sqrt();
+                assert!((rad - r).abs() < 1e-12, "端面参数域点应在半径 {r} 上");
+            }
+        }
+    }
+
+    /// 盒子不填参数域（步 2 只动圆柱），`check()` 直接通过。
+    #[test]
+    fn 盒子暂未填参数域() {
+        let s = box_solid([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        assert!(s.faces.iter().all(|f| f.boundary.is_none()));
+        for f in &s.faces {
+            assert!(f.check(&s, 1e-9).is_ok());
+        }
+    }
 
     #[test]
     fn 长方体体积面积精确() {
