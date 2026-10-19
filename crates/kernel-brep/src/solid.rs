@@ -311,8 +311,11 @@ impl Solid {
                 .or_else(|| polygon_normal(&self.verts, &f.verts))
                 .unwrap_or([0.0, 0.0, 1.0]);
 
-            // 三角化：简单面沿用扇形（快，且凸面结果一样）；
-            // 带洞面必须走桥接 + 耳切，否则洞会被扇形剖分「填上」。
+            // 三角化：凸面用扇形（快）；带洞面走桥接 + 耳切（否则洞会被扇形剖分「填上」）。
+            //
+            // **非凸的无洞面也必须走耳切**。扇形只对凸多边形成立，
+            // 非凸时拉出的三角形会互相重叠、而且没有任何报错——
+            // 这是典型的静默错误。布尔件的碎片面里非凸很常见。
             if f.holes.is_empty() {
                 if let crate::geom::Surface::Sphere { center, radius } = &f.surface {
                     // 球面片不能用纯扇形。
@@ -374,9 +377,15 @@ impl Solid {
                     for t in tris {
                         idx.extend_from_slice(&t);
                     }
-                } else {
+                } else if ring_is_convex(&pos, &f.verts, face_n) {
                     for i in 1..n - 1 {
                         idx.extend_from_slice(&[f.verts[0], f.verts[i], f.verts[i + 1]]);
+                    }
+                } else {
+                    // 非凸：交给耳切（holes 为空时它会走纯 ear_clip）
+                    let tris = crate::poly2d::triangulate_face(&pos, &f.verts, &[], face_n);
+                    for t in tris {
+                        idx.extend_from_slice(&t);
                     }
                 }
             } else {
@@ -405,6 +414,36 @@ impl Solid {
     }
 }
 
+/// 环在给定法线朝向下是否是凸多边形。
+///
+/// 只要出现一个「凹角」（相邻两点的叉积与法线反向），就判非凸。
+/// 这是**扇形剖分能不能用**的前提检查——扇形对凹多边形会切出重叠三角形，
+/// 而且不会报错，属于静默错误。
+fn ring_is_convex(verts: &[Point3], ring: &[u32], n: Vector3) -> bool {
+    let m = ring.len();
+    if m < 3 {
+        return false;
+    }
+    let mut sign = 0.0_f64;
+    for i in 0..m {
+        let a = verts[ring[i] as usize];
+        let b = verts[ring[(i + 1) % m] as usize];
+        let c = verts[ring[(i + 2) % m] as usize];
+        let u = sub(b, a);
+        let v = sub(c, b);
+        let cr = cross(u, v);
+        let d = dot(cr, n);
+        if d.abs() < 1e-15 {
+            continue; // 共线：跳过
+        }
+        if sign == 0.0 {
+            sign = d;
+        } else if d * sign < 0.0 {
+            return false;
+        }
+    }
+    true
+}
 fn centroid_of(verts: &[Point3], ring: &[u32]) -> Point3 {
     let mut s = [0.0, 0.0, 0.0];
     let mut n = 0.0;

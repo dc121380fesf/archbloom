@@ -49,7 +49,7 @@ mod solid;
 mod step;
 mod stl;
 
-pub use bsp::{difference, intersection, union, Node, Plane, Polygon};
+pub use bsp::{Plane, Polygon};
 pub use chamfer::{chamfer_solid, edge_table, ChamferOptions, EdgeRec};
 pub use fillet::{fillet_solid, FilletOptions};
 pub use edges::{list_edges, EdgeInfo};

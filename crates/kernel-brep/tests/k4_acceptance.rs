@@ -176,3 +176,33 @@ fn k4_取消优先于计算() {
     assert!(matches!(err, archcore_kernel::KernelError::Cancelled));
     assert_eq!(k.len(), before, "取消不得留下半成品实体");
 }
+// ─── 以下两个场景原本由 bsp.rs 里的 BSP 算法测试覆盖。 ───
+//
+// BSP 的 Node/union/difference/intersection 已是死代码（正式路径走 csg.rs 的
+// 切分+分类+缝合），连同它们的测试一并删除。但这两个**边界场景**确实有价值，
+// 所以改写成走内核正式路径的版本，保住同样的可验证性。
+
+#[test]
+fn k4_交集_两立方体只重叠一角() {
+    // [0,1]³ 与 [0.5,1.5]³ 的重叠只有 [0.5,1]³ = 0.125
+    let mut k = BrepKernel::new();
+    let a = k.add_box([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]).0 as u32;
+    let b = k.add_box([0.5, 0.5, 0.5], [1.5, 1.5, 1.5]).0 as u32;
+    let (_, v, wt) = do_bool(&mut k, a, b, BoolOp::Intersection);
+    assert!(wt, "交集必须水密");
+    assert!((v - 0.125).abs() < 1e-9, "重叠体积应为 0.125，实际 {v:.12}");
+}
+
+#[test]
+fn k4_差集_完全包含时为空() {
+    // 小盒完全在大盒内部：A - B 得到带空腔的实体，体积 = 大 - 小
+    let mut k = BrepKernel::new();
+    let big = k.add_box([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]).0 as u32;
+    let small = k.add_box([0.5, 0.5, 0.5], [1.5, 1.5, 1.5]).0 as u32;
+    let (_, v, wt) = do_bool(&mut k, big, small, BoolOp::Difference);
+    assert!(wt, "带内腔的实体必须水密");
+    assert!(
+        (v - 7.0).abs() < 1e-9,
+        "体积应为 8-1=7，实际 {v:.12}"
+    );
+}
