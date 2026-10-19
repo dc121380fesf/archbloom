@@ -37,9 +37,58 @@ pub struct Face {
     pub verts: Vec<u32>,
     /// 内环（孔洞）。空表示简单多边形。
     pub holes: Vec<Vec<u32>>,
+
+    /// 参数域边界：外环 + 洞，点在 `surface` 的 (u,v) 参数空间里。
+    ///
+    /// **现在全是 `None`**。它是「面的真相」，`verts` 是从它派生出来的离散缓存；
+    /// 两者一致由 [`Face::check`] 保证。
+    ///
+    /// 迁移计划见 `docs/face-param-domain.md`：步 0 只加字段不动逻辑，
+    /// 步 2 开始给圆柱填，步 4 才让 `verts` 真正从它生成。
+    pub boundary: Option<Vec<Vec<[f64; 2]>>>,
+
+    /// 这个面承诺的弦高误差（米）。细分点数应由它反解，而不是硬编码 16/64/8。
+    ///
+    /// 同样现在是 `None`——没填就表示「沿用调用方给的离散精度」。
+    pub tolerance: Option<f64>,
 }
 
 impl Face {
+    /// 构造一个**没有参数域信息**的面（迁移期的默认形态）。
+    ///
+    /// 迁移完成后这个构造函数应该逐步消失，全部改成
+    /// `Face::from_boundary(surface, boundary, tolerance)`。
+    pub fn legacy(surface: Surface, verts: Vec<u32>, holes: Vec<Vec<u32>>) -> Self {
+        Self {
+            surface,
+            verts,
+            holes,
+            boundary: None,
+            tolerance: None,
+        }
+    }
+
+    /// 校验 `verts` 与 `surface` 是否自洽：每个离散点到曲面的距离必须在 `tol` 内。
+    ///
+    /// 没有 `boundary` 或 `tolerance` 时直接通过（迁移期的面还没填）。
+    /// 平面上的点永远在曲面上，所以平面面天然通过。
+    pub fn check(&self, solid: &Solid, tol: f64) -> Result<(), String> {
+        if self.boundary.is_none() {
+            return Ok(());
+        }
+        for ring in self.all_rings() {
+            for &v in ring {
+                let p = solid.verts[v as usize];
+                let d = self.surface.distance_to(p);
+                if d > tol {
+                    return Err(format!(
+                        "顶点 {v} 距曲面 {d:.3e} 米，超过容差 {tol:.3e}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
     /// 遍历这个面的所有环（外环在前，然后各个洞）。
     ///
     /// 拓扑检查（水密、欧拉、边计数）都必须走这里，只看 `verts` 会把洞的边漏掉。
@@ -91,6 +140,36 @@ pub struct Solid {
 }
 
 impl Solid {
+    /// 实体体检：报告「同一个曲面被切成多少片」。
+    ///
+    /// # 为什么需要它
+    ///
+    /// `Face::check` 只能验证「离散点是否落在声称的曲面上」——而现在的顶点
+    /// **确实都在曲面上**（它们就是按曲面参数生成的）。真正的债是别的：
+    /// 一个圆柱侧面本该是 **1 个面**，实际被切成 16 片共享同一个 `Cylinder`
+    /// 标注。顶点没错，**面的划分错了**。
+    ///
+    /// 这个函数把这种债量出来：返回 `(曲面描述, 面数)`，只列面数 > 1 的。
+    /// 它不改任何东西，只让债显形——设计稿步 1 的全部目的就是这个。
+    pub fn audit(&self) -> Vec<(String, usize)> {
+        let mut groups: Vec<(Surface, usize)> = Vec::new();
+        for f in &self.faces {
+            // 平面按法线 + 过点归组，曲面按参数归组
+            match groups.iter_mut().find(|(s, _)| same_surface_key(s, &f.surface)) {
+                Some((_, n)) => *n += 1,
+                None => groups.push((f.surface, 1)),
+            }
+        }
+        let mut out: Vec<(String, usize)> = groups
+            .into_iter()
+            .filter(|(_, n)| *n > 1)
+            .map(|(s, n)| (describe_surface(&s), n))
+            .collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out
+    }
+
+
     pub fn push_vert(&mut self, p: Point3) -> u32 {
         self.verts.push(p);
         (self.verts.len() - 1) as u32
@@ -101,6 +180,8 @@ impl Solid {
             surface,
             verts,
             holes: Vec::new(),
+        boundary: None,
+        tolerance: None,
         });
         self.faces.len() - 1
     }
@@ -444,6 +525,58 @@ fn ring_is_convex(verts: &[Point3], ring: &[u32], n: Vector3) -> bool {
     }
     true
 }
+
+/// 两个曲面是否「同族」：同类且参数相同。
+fn same_surface_key(a: &Surface, b: &Surface) -> bool {
+    match (a, b) {
+        (
+            Surface::Plane {
+                normal: n1,
+                origin: o1,
+            },
+            Surface::Plane {
+                normal: n2,
+                origin: o2,
+            },
+        ) => {
+            // **法线必须同向**。用 abs 会把「顶面」和「底面」判成同一个曲面
+            // （法线 ±z，点积 -1，取绝对值就变 1 了）——那是两个不同的面。
+            dot(*n1, *n2) > 1.0 - 1e-9 && dot(sub(*o2, *o1), *n1).abs() < 1e-9
+        }
+        (
+            Surface::Cylinder {
+                axis: a1, radius: r1, ..
+            },
+            Surface::Cylinder {
+                axis: a2, radius: r2, ..
+            },
+        ) => (r1 - r2).abs() < 1e-12 && dot(*a1, *a2).abs() > 1.0 - 1e-9,
+        (
+            Surface::Sphere {
+                center: c1, radius: r1, ..
+            },
+            Surface::Sphere {
+                center: c2, radius: r2, ..
+            },
+        ) => {
+            (r1 - r2).abs() < 1e-12 && dot(sub(*c2, *c1), sub(*c2, *c1)) < 1e-18
+        }
+        _ => false,
+    }
+}
+
+fn describe_surface(s: &Surface) -> String {
+    match s {
+        Surface::Plane { normal, .. } => {
+            format!("平面 n=({:.2},{:.2},{:.2})", normal[0], normal[1], normal[2])
+        }
+        Surface::Cylinder { radius, .. } => format!("圆柱面 r={radius:.6}"),
+        Surface::Sphere { radius, .. } => format!("球面 r={radius:.6}"),
+        Surface::Cone { .. } => "圆锥面".to_string(),
+        Surface::Torus { .. } => "圆环面".to_string(),
+    }
+}
+
 fn centroid_of(verts: &[Point3], ring: &[u32]) -> Point3 {
     let mut s = [0.0, 0.0, 0.0];
     let mut n = 0.0;
