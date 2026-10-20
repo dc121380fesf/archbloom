@@ -199,7 +199,7 @@ pub fn fillet_solid(
         // 方向靠「边点 → 圆心」再投影到面内得到。
         // **不能用 cross(n, edir)**——它的符号依赖环方向，盒子两个面一个对一个反，
         // 实测体积会超过原体积（8.01 / 8.65），说明弧朝外凸了。
-        let edir = normalize(sub(pb, pa)).unwrap_or([1.0, 0.0, 0.0]);
+
         let dir1 = {
             let d = sub(ca, pa);
             let proj = sub(d, scale(n1, dot(d, n1)));
@@ -214,23 +214,24 @@ pub fn fillet_solid(
         let rp1 = add(pa, scale(dir1, r));
         let rp2 = add(pa, scale(dir2, r));
 
-        // 端点：与两端球面求交
-        let a1 = trim_to_sphere(rp1, edir, spheres.get(&e.a), r).unwrap_or(rp1);
-        let b1 = trim_to_sphere(
-            add(pb, scale(dir1, r)),
-            edir,
-            spheres.get(&e.b),
-            r,
-        )
-        .unwrap_or(add(pb, scale(dir1, r)));
-        let a2 = trim_to_sphere(rp2, edir, spheres.get(&e.a), r).unwrap_or(rp2);
-        let b2 = trim_to_sphere(
-            add(pb, scale(dir2, r)),
-            edir,
-            spheres.get(&e.b),
-            r,
-        )
-        .unwrap_or(add(pb, scale(dir2, r)));
+        // 端点：**面与球面的切点** c + R·n_f
+        //
+        // 原来走的是「沿棱方向推到球面」，得到的是**棱上的点**，不是切点。
+        // 两条棱沿不同方向内缩，端点间距 = 2R·sin(θ/2)（弦长）：
+        //   盒子 90°      → 1.4142R   实测 1.4142R
+        //   圆柱 16 段    157.5°    → 1.9616R   实测 1.9616R
+        //   圆柱 128 段   177.19°   → 1.9994R   实测 1.9994R
+        // N→∞ 时两棱趋于反向，弦→直径 2R，所以间隙「不随 N 缩小」是必然。
+        //
+        // 而切点 c + R·n_f 同时满足两条恒等式：
+        //   |p − c| = R              → 在球面上
+        //   (p − c)·e = R·(n_f·e) = 0 → 在柱面上（n_f ⊥ e）
+        // 也就是说**切点本来就是大圆上的点**，同一个面上两条棱给出的端点
+        // 必须是同一个点——「顶点唯一」不需要任何拼接手段来维护。
+        let a1 = corner_point(spheres.get(&e.a), n1, r).unwrap_or(rp1);
+        let b1 = corner_point(spheres.get(&e.b), n1, r).unwrap_or(add(pb, scale(dir1, r)));
+        let a2 = corner_point(spheres.get(&e.a), n2, r).unwrap_or(rp2);
+        let b2 = corner_point(spheres.get(&e.b), n2, r).unwrap_or(add(pb, scale(dir2, r)));
 
         rails.insert(
             (e.a, e.b),
@@ -385,6 +386,8 @@ pub fn fillet_solid(
                 surface: f.surface,
                 verts: ring,
                 holes: Vec::new(),
+            boundary: None,
+            tolerance: None,
             });
         }
     }
@@ -448,6 +451,8 @@ pub fn fillet_solid(
                     },
                     verts: quad,
                     holes: Vec::new(),
+                boundary: None,
+                tolerance: None,
                 });
             }
             prev_a = va;
@@ -515,55 +520,21 @@ fn solve_sphere_center(v: Point3, normals: &[Vector3], r: f64) -> Option<Point3>
     Some([x, y, z])
 }
 
-/// 把轨线起点沿边方向推到球面上（取靠边的根）。
-fn trim_to_sphere(
-    p0: Point3,
-    dir: Vector3,
-    sphere: Option<&(Point3, Vec<usize>)>,
-    r: f64,
-) -> Option<Point3> {
+/// 面与球面的**切点**：`c + R·n_f`。
+///
+/// 这是角部唯一的真值。同一个面上两条棱都必须得到它——它们共用同一个
+/// 球心 `c` 和同一个面法线 `n_f`，结果按构造成立，不靠容差去合。
+///
+/// 两条恒等式（这就是为什么它同时也是大圆上的点）：
+/// ```text
+/// |p − c| = |R·n_f| = R                   → 在球面上
+/// (p − c)·e = R·(n_f·e) = 0               → 在柱面上（n_f ⊥ e）
+/// ```
+///
+/// 顶点没有球（单边圆角）时返回 `None`，调用方退回旧做法。
+fn corner_point(sphere: Option<&(Point3, Vec<usize>)>, n_f: Vector3, r: f64) -> Option<Point3> {
     let (c, _) = sphere?;
-    // |p0 + t*dir - c|² = r²
-    let d = sub(p0, *c);
-    let a = dot(dir, dir);
-    let b = 2.0 * dot(d, dir);
-    let cc = dot(d, d) - r * r;
-    let disc = b * b - 4.0 * a * cc;
-    // 判别式在这里**恒为 0**（重根），不是巧合：
-    //   |p0−c|² = 2R²　⇒　cc = R²
-    //   b = 2(p0−c)·dir = −2R　⇒　b² = 4R²
-    //   disc = 4R² − 4R² = 0
-    // 所以剩下的只有浮点误差。写 `disc < 0.0` 太硬：R 小的时候
-    // 相对误差更大，踩到 −1e-18 就直接返回 None，端点丢掉，
-    // 整个角部缝合崩掉。
-    //
-    // 实测表现：盒子 1m 边长时 R=0.1 能过、R=0.05 失败；
-    // 0.1m 边长时 R=0.01 能过、R=0.005 失败。
-    let eps = 1e-12 * (b * b).max(1e-30);
-    if disc < -eps {
-        return None;
-    }
-    let disc = disc.max(0.0);
-    let sq = disc.sqrt();
-    let t1 = (-b + sq) / (2.0 * a);
-    let t2 = (-b - sq) / (2.0 * a);
-    if std::env::var("ARCHCORE_DEBUG_FILLET").is_ok() {
-        eprintln!("[trim] p0={:?} dir={:?} c={:?} | d={:?} b={:.4} cc={:.4} disc={:.4} t1={:.4} t2={:.4}",
-            p0, dir, c, d, b, cc, disc, t1, t2);
-    }
-    // 取较小的正根（离边最近）
-    let t = if t1.abs() < t2.abs() {
-        t1
-    } else {
-        t2
-    };
-    Some(add(p0, scale(dir, t)))
-}
-
-#[allow(dead_code)]
-fn dist2(a: Point3, b: Point3) -> f64 {
-    let d = sub(a, b);
-    dot(d, d)
+    Some(add(*c, scale(n_f, r)))
 }
 
 pub(super) fn centroid_of(out: &Solid, ring: &[u32]) -> Point3 {
