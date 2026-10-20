@@ -151,6 +151,8 @@ pub fn polygons_to_solid(polys: &[Polygon]) -> Result<Solid, KernelError> {
             surface: p.surface,
             verts: ring,
             holes: Vec::new(),
+        boundary: None,
+        tolerance: None,
         });
     }
 
@@ -217,8 +219,33 @@ pub fn solid_to_polygons(s: &Solid) -> Vec<Polygon> {
             .iter()
             .filter_map(|i| s.verts.get(*i as usize).copied())
             .collect();
-        // 带着曲面标注进布尔链，否则圆柱会在重建后退成平面
-        if let Some(p) = Polygon::with_surface(verts, f.surface) {
+        // 带洞面：**必须把洞带过去**。
+        //
+        // 早先这里只读 `f.verts`，`f.holes` 一字没读。结果：开孔板的顶面
+        // （外环 132 点 + 孔环 64 点）转成 Polygon 后变成一块**实心板**，
+        // 第二次布尔拿到的输入等于「没打孔的板」。
+        // 实测「1 孔 + 1 槽」体积比光板还大 34%。
+        //
+        // 现在洞跟着进链：`Polygon::holes` + `area()` 减洞。
+        // 注意切分（`split_polygon`）**还不处理洞**——这一步只保证「输入正确」，
+        // 洞会不会在切分里丢，要靠后面的断言去暴露。
+        let holes: Vec<Vec<Point3>> = f
+            .holes
+            .iter()
+            .map(|h| {
+                h.iter()
+                    .filter_map(|i| s.verts.get(*i as usize).copied())
+                    .collect()
+            })
+            .filter(|h: &Vec<Point3>| h.len() >= 3)
+            .collect();
+        let p = if holes.is_empty() {
+            // 带着曲面标注进布尔链，否则圆柱会在重建后退成平面
+            Polygon::with_surface(verts, f.surface)
+        } else {
+            Polygon::with_holes(verts, holes, f.surface)
+        };
+        if let Some(p) = p {
             out.push(p);
         }
     }

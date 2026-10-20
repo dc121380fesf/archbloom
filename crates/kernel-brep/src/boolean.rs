@@ -91,6 +91,19 @@ pub struct Polygon {
     /// 早先没有这个字段，布尔一跑就把圆柱面的身份退成 `Plane` ——
     /// 实测开孔板 169 个面全是 plane，真曲面导出变成了“只对没做过布尔的圆柱生效”。
     pub surface: Surface,
+
+    /// 内环（洞）。空表示简单多边形。
+    ///
+    /// # 为什么必须有
+    ///
+    /// 布尔代数的封闭性要求中间态支持带洞面：挖一个盲孔，顶面立刻有洞。
+    /// 早先没这个字段，第一次布尔的输出（顶面 = 外环 132 点 + 孔环 64 点）
+    /// 进第二次布尔时洞被丢掉，顶面变实心 —— 实测「1 孔 + 1 槽」体积比光板还大 34%。
+    ///
+    /// # 定向约定
+    ///
+    /// 依 `plane.normal`：外环逆时针，每个洞顺时针（面积相减）。
+    pub holes: Vec<Vec<Point3>>,
 }
 
 impl Polygon {
@@ -104,6 +117,7 @@ impl Polygon {
             verts,
             plane,
             surface,
+            holes: Vec::new(),
         })
     }
 
@@ -114,23 +128,51 @@ impl Polygon {
             verts,
             plane,
             surface,
+            holes: Vec::new(),
+        })
+    }
+
+    /// 带洞构造。洞必须在外环内，且与 `plane.normal` 反向（顺时针）。
+    pub fn with_holes(
+        verts: Vec<Point3>,
+        holes: Vec<Vec<Point3>>,
+        surface: Surface,
+    ) -> Option<Self> {
+        let plane = Plane::from_polygon(&verts)?;
+        Some(Self {
+            verts,
+            plane,
+            surface,
+            holes,
         })
     }
 
     pub fn flip(&mut self) {
         self.verts.reverse();
         self.plane.flip();
+        for h in &mut self.holes {
+            h.reverse();
+        }
     }
 
-    /// 扇形三角化的面积（用于统计与检查）。
+    /// 面积 = 外环 − Σ 洞。
+    ///
+    /// 早先只算外环、不认洞——带洞面会被当成实心，体积直接变大。
     pub fn area(&self) -> f64 {
-        let mut sum = 0.0;
-        for i in 1..self.verts.len().saturating_sub(1) {
-            let u = sub(self.verts[i], self.verts[0]);
-            let v = sub(self.verts[i + 1], self.verts[0]);
-            sum += len(cross(u, v)) / 2.0;
+        fn fan_area(verts: &[Point3]) -> f64 {
+            let mut sum = 0.0;
+            for i in 1..verts.len().saturating_sub(1) {
+                let u = sub(verts[i], verts[0]);
+                let v = sub(verts[i + 1], verts[0]);
+                sum += len(cross(u, v)) / 2.0;
+            }
+            sum
         }
-        sum
+        let mut a = fan_area(&self.verts);
+        for h in &self.holes {
+            a -= fan_area(h);
+        }
+        a
     }
 
     /// 质心（顶点平均，够用）。
